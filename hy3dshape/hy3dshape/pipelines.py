@@ -305,6 +305,17 @@ class Hunyuan3DDiTPipeline:
             self.conditioner.to(device)
 
     @property
+    def components(self):
+        """Pipeline components used by CPU-offload helpers."""
+        return {
+            "vae": self.vae,
+            "model": self.model,
+            "scheduler": self.scheduler,
+            "conditioner": self.conditioner,
+            "image_processor": self.image_processor,
+        }
+
+    @property
     def _execution_device(self):
         r"""
         Returns the device on which the pipeline's models will be executed. After calling
@@ -580,7 +591,7 @@ class Hunyuan3DDiTPipeline:
 
         self.set_surface_extractor(mc_algo)
 
-        device = self.device
+        device = self._execution_device
         dtype = self.dtype
         do_classifier_free_guidance = guidance_scale >= 0 and \
                                       getattr(self.model, 'guidance_cond_proj_dim', None) is None
@@ -714,7 +725,7 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
 
         self.set_surface_extractor(mc_algo)
 
-        device = self.device
+        device = self._execution_device
         dtype = self.dtype
         do_classifier_free_guidance = guidance_scale >= 0 and not (
             hasattr(self.model, 'guidance_embed') and
