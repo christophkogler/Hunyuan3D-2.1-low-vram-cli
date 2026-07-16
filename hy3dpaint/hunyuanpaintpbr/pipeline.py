@@ -220,7 +220,7 @@ class HunyuanPaintPipeline(StableDiffusionPipeline):
         images_vae = [torch.tensor(np.array(image) / 255.0) for image in images]
         images_vae = [image_vae.unsqueeze(0).permute(0, 3, 1, 2).unsqueeze(0) for image_vae in images_vae]
         images_vae = torch.cat(images_vae, dim=1)
-        images_vae = images_vae.to(device=self.vae.device, dtype=self.unet.dtype)
+        images_vae = images_vae.to(device=self._execution_device, dtype=self.unet.dtype)
 
         batch_size = images_vae.shape[0]
         N_ref = images_vae.shape[1]

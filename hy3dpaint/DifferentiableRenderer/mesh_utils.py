@@ -14,7 +14,6 @@
 
 import os
 import cv2
-import bpy
 import math
 import numpy as np
 from io import StringIO
@@ -266,6 +265,9 @@ def convert_obj_to_glb(
 ) -> bool:
     """Convert OBJ file to GLB format using Blender."""
     try:
+        global bpy
+        import bpy
+
         _setup_blender_scene()
         _clear_scene_objects()
 

@@ -1,0 +1,178 @@
+"""Stable JSON CLI around the repository's shape and texture engines."""
+from __future__ import annotations
+
+import argparse
+import contextlib
+import json
+import os
+import shutil
+import sys
+import traceback
+import urllib.request
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+MODEL_REVISIONS = {
+    "hunyuan": "0b94677654c57bb9a6b6845cd7b704ccf551d327",
+    "dino": "611a9d42f2335e0f921f1e313ad3c1b7178d206d",
+}
+REAL_ESRGAN_URL = "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth"
+
+
+def emit(payload: dict, code: int = 0) -> int:
+    print(json.dumps(payload, sort_keys=True), flush=True)
+    return code
+
+
+def cache_root(value: str | None) -> Path:
+    return Path(value or os.environ.get("HUNYUAN3D_CACHE", ROOT / ".cache/hunyuan3d"))
+
+
+def legacy_paths() -> None:
+    for path in (ROOT, ROOT / "hy3dshape", ROOT / "hy3dpaint", ROOT / "hy3dpaint/custom_rasterizer"):
+        if str(path) not in sys.path:
+            sys.path.insert(0, str(path))
+
+
+def configure_runtime(cache: Path) -> None:
+    cache.mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault("HF_HOME", str(cache / "huggingface"))
+    os.environ.setdefault("HY3DGEN_MODELS", str(cache / "models"))
+    os.environ.setdefault("U2NET_HOME", str(cache / "rembg"))
+    # Importing torch first exposes its CUDA shared objects to the native
+    # rasterizer extension, including on distributions without a global CUDA
+    # runtime linker path.
+    import torch
+    torch_lib = Path(torch.__file__).resolve().parent / "lib"
+    if torch_lib.exists():
+        os.environ["LD_LIBRARY_PATH"] = ":".join(filter(None, [str(torch_lib), os.environ.get("LD_LIBRARY_PATH")]))
+
+
+def prepare_image(source: Path, destination: Path) -> Path:
+    legacy_paths()
+    from PIL import Image
+    from hy3dshape.rembg import BackgroundRemover
+    with contextlib.redirect_stdout(sys.stderr):
+        result = BackgroundRemover()(Image.open(source).convert("RGB")).convert("RGBA")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    result.save(destination)
+    return destination
+
+
+def pull_models(cache: Path, components: set[str]) -> list[str]:
+    from huggingface_hub import snapshot_download
+    pulled = []
+    if "shape" in components:
+        snapshot_download("tencent/Hunyuan3D-2.1", revision=MODEL_REVISIONS["hunyuan"],
+                          allow_patterns=["hunyuan3d-dit-v2-1/*"],
+                          local_dir=cache / "models/tencent/Hunyuan3D-2.1")
+        pulled.append("shape")
+    if "texture" in components:
+        snapshot_download("tencent/Hunyuan3D-2.1", revision=MODEL_REVISIONS["hunyuan"],
+                          allow_patterns=["hunyuan3d-paintpbr-v2-1/*"],
+                          local_dir=cache / "models/tencent/Hunyuan3D-2.1")
+        snapshot_download("facebook/dinov2-giant", revision=MODEL_REVISIONS["dino"], cache_dir=cache / "huggingface")
+        checkpoint = cache / "realesrgan/RealESRGAN_x4plus.pth"
+        checkpoint.parent.mkdir(parents=True, exist_ok=True)
+        if not checkpoint.exists():
+            urllib.request.urlretrieve(REAL_ESRGAN_URL, checkpoint)
+        pulled.append("texture")
+    return pulled
+
+
+def shape(image: Path, output: Path, cache: Path, steps: int, seed: int | None) -> Path:
+    legacy_paths()
+    import torch
+    from hy3dshape.pipelines import Hunyuan3DDiTFlowMatchingPipeline
+    with contextlib.redirect_stdout(sys.stderr):
+        pipe = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained("tencent/Hunyuan3D-2.1")
+        if torch.cuda.get_device_properties(0).total_memory < 21 * 1024**3:
+            pipe.enable_model_cpu_offload(device="cuda")
+        generator = torch.Generator(device=pipe._execution_device).manual_seed(seed) if seed is not None else None
+        mesh = pipe(image=str(image), num_inference_steps=steps, generator=generator)[0]
+    output.parent.mkdir(parents=True, exist_ok=True)
+    mesh.export(output)
+    return output
+
+
+def texture(mesh: Path, image: Path, output: Path, cache: Path) -> Path:
+    legacy_paths()
+    from torchvision_fix import apply_fix
+    apply_fix()
+    from textureGenPipeline import Hunyuan3DPaintConfig, Hunyuan3DPaintPipeline
+    config = Hunyuan3DPaintConfig(max_num_view=6, resolution=512, cpu_offload=True)
+    config.realesrgan_ckpt_path = str(cache / "realesrgan/RealESRGAN_x4plus.pth")
+    with contextlib.redirect_stdout(sys.stderr):
+        pipeline = Hunyuan3DPaintPipeline(config)
+        pipeline(mesh_path=str(mesh), image_path=str(image), output_mesh_path=str(output.with_suffix(".obj")), save_glb=False)
+    return output.with_suffix(".obj")
+
+
+def model_status(cache: Path) -> dict:
+    root = cache / "models/tencent/Hunyuan3D-2.1"
+    return {
+        "shape": (root / "hunyuan3d-dit-v2-1/model.fp16.ckpt").is_file(),
+        "texture": (root / "hunyuan3d-paintpbr-v2-1/unet/diffusion_pytorch_model.bin").is_file(),
+        "dino": (cache / "huggingface/hub/models--facebook--dinov2-giant").is_dir(),
+        "realesrgan": (cache / "realesrgan/RealESRGAN_x4plus.pth").is_file(),
+    }
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="hunyuan3d")
+    parser.add_argument("--cache-dir")
+    sub = parser.add_subparsers(dest="command", required=True)
+    sub.add_parser("doctor")
+    models = sub.add_parser("models")
+    models.add_argument("action", choices=["pull", "status"])
+    models.add_argument("--components", default="shape,texture")
+    prep = sub.add_parser("prepare")
+    prep.add_argument("image", type=Path)
+    prep.add_argument("--output", type=Path, required=True)
+    shape_cmd = sub.add_parser("shape")
+    shape_cmd.add_argument("--image", type=Path, required=True)
+    shape_cmd.add_argument("--output", type=Path, required=True)
+    shape_cmd.add_argument("--steps", type=int, default=50)
+    shape_cmd.add_argument("--seed", type=int)
+    texture_cmd = sub.add_parser("texture")
+    texture_cmd.add_argument("--mesh", type=Path, required=True)
+    texture_cmd.add_argument("--image", type=Path, required=True)
+    texture_cmd.add_argument("--output", type=Path, required=True)
+    generate = sub.add_parser("generate")
+    generate.add_argument("--image", type=Path, required=True)
+    generate.add_argument("--output-dir", type=Path, required=True)
+    generate.add_argument("--shape-only", action="store_true")
+    generate.add_argument("--steps", type=int, default=50)
+    generate.add_argument("--seed", type=int)
+    args = parser.parse_args(argv)
+    try:
+        cache = cache_root(args.cache_dir)
+        configure_runtime(cache)
+        if args.command == "doctor":
+            import torch
+            return emit({"ok": torch.cuda.is_available(), "cuda": torch.cuda.is_available(), "nvcc": shutil.which("nvcc"), "cache": str(cache), "torch": torch.__version__}, 0 if torch.cuda.is_available() else 2)
+        if args.command == "models":
+            components = set(args.components.split(","))
+            if args.action == "pull":
+                return emit({"ok": True, "pulled": pull_models(cache, components), "cache": str(cache)})
+            return emit({"ok": True, "cache": str(cache), "models": model_status(cache)})
+        if args.command == "prepare":
+            return emit({"ok": True, "image": str(prepare_image(args.image, args.output))})
+        if args.command == "shape":
+            return emit({"ok": True, "shape": str(shape(args.image, args.output, cache, args.steps, args.seed))})
+        if args.command == "texture":
+            return emit({"ok": True, "texture": str(texture(args.mesh, args.image, args.output, cache))})
+        prepared = args.output_dir / "input.rgba.png"
+        prepare_image(args.image, prepared)
+        glb = shape(prepared, args.output_dir / "shape.glb", cache, args.steps, args.seed)
+        result = {"ok": True, "input": str(prepared), "shape": str(glb)}
+        if not args.shape_only:
+            result["texture"] = str(texture(glb, prepared, args.output_dir / "textured", cache))
+        return emit(result)
+    except Exception as error:
+        traceback.print_exc(file=sys.stderr)
+        return emit({"ok": False, "error": type(error).__name__, "message": str(error)}, 1)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
