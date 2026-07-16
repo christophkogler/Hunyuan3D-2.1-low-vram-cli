@@ -58,7 +58,7 @@ hunyuan3d generate --image flower.png --output-dir output --seed 42
 
 The project uses `pyproject.toml` plus `uv.lock` as its dependency source of truth. Package versions are bounded to current-compatible releases and the lock file makes installs reproducible. PyTorch wheels come from the CUDA 12.4 PyTorch index. To refresh the lock deliberately, use `uv lock --upgrade`; normal users should use `bootstrap.sh` unchanged.
 
-The previous Gradio, API, notebook, training, and demo entry points are no longer documented or supported. The legacy inference modules remain behind the CLI while the model implementations are progressively consolidated; do not invoke them directly.
+The previous Gradio, API, notebook, training, Docker-demo, and sample-data surfaces have been removed. The retained model runtime is private implementation detail behind the CLI; do not invoke it directly.
 
 ## Outputs
 
