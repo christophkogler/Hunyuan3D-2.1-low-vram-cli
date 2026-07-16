@@ -142,6 +142,11 @@ python3 gradio_app.py \
   --low_vram_mode
 ```
 
+`--low_vram_mode` keeps the shape and PBR texture model weights in system RAM
+and offloads inactive components from the GPU. It substantially lowers VRAM
+use at the cost of slower generation; 32 GB or more of system RAM is
+recommended for the full texture pipeline.
+
 
 ## 🔗 BibTeX
 

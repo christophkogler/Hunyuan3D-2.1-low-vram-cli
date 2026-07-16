@@ -308,6 +308,10 @@ def _gen_shape(
         num_chunks=num_chunks,
         output_type='mesh'
     )
+    if args.low_vram_mode:
+        # Ensure the shape model is back in system RAM before PBR texturing.
+        i23d_worker.maybe_free_model_hooks()
+        torch.cuda.empty_cache()
     time_meta['shape generation'] = time.time() - start_time
     logger.info("---Shape generation takes %s seconds ---" % (time.time() - start_time))
 
@@ -796,7 +800,9 @@ if __name__ == '__main__':
             #     texgen_worker.enable_model_cpu_offload()
 
             from hy3dpaint.textureGenPipeline import Hunyuan3DPaintPipeline, Hunyuan3DPaintConfig
-            conf = Hunyuan3DPaintConfig(max_num_view=8, resolution=768)
+            conf = Hunyuan3DPaintConfig(
+                max_num_view=8, resolution=768, cpu_offload=args.low_vram_mode
+            )
             conf.realesrgan_ckpt_path = "hy3dpaint/ckpt/RealESRGAN_x4plus.pth"
             conf.multiview_cfg_path = "hy3dpaint/cfgs/hunyuan-paint-pbr.yaml"
             conf.custom_pipeline = "hy3dpaint/hunyuanpaintpbr"
@@ -838,6 +844,8 @@ if __name__ == '__main__':
         use_safetensors=False,
         device=args.device,
     )
+    if args.low_vram_mode:
+        i23d_worker.enable_model_cpu_offload(device=args.device)
     if args.enable_flashvdm:
         mc_algo = 'mc' if args.device in ['cpu', 'mps'] else args.mc_algo
         i23d_worker.enable_flashvdm(mc_algo=mc_algo)

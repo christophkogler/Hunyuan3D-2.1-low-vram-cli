@@ -50,12 +50,20 @@ class multiviewDiffusionNet:
         pipeline.set_progress_bar_config(disable=True)
         pipeline.eval()
         setattr(pipeline, "view_size", cfg.model.params.get("view_size", 320))
-        self.pipeline = pipeline.to(self.device)
+        self.cpu_offload = config.cpu_offload
+        if self.cpu_offload:
+            # HunyuanPaintPipeline inherits Diffusers' model CPU offload
+            # implementation. It keeps one component on the GPU at a time,
+            # while the remaining weights reside in system RAM.
+            pipeline.enable_model_cpu_offload()
+            self.pipeline = pipeline
+        else:
+            self.pipeline = pipeline.to(self.device)
 
         if hasattr(self.pipeline.unet, "use_dino") and self.pipeline.unet.use_dino:
             from hunyuanpaintpbr.unet.modules import Dino_v2
             self.dino_v2 = Dino_v2(config.dino_ckpt_path).to(torch.float16)
-            self.dino_v2 = self.dino_v2.to(self.device)
+            self.dino_v2 = self.dino_v2.to("cpu" if self.cpu_offload else self.device)
 
     def seed_everything(self, seed):
         random.seed(seed)
@@ -85,7 +93,8 @@ class multiviewDiffusionNet:
             control_images[i] = control_images[i].resize((custom_view_size, custom_view_size))
             if control_images[i].mode == "L":
                 control_images[i] = control_images[i].point(lambda x: 255 if x > 1 else 0, mode="1")
-        kwargs = dict(generator=torch.Generator(device=self.pipeline.device).manual_seed(0))
+        execution_device = self.pipeline._execution_device if self.cpu_offload else self.pipeline.device
+        kwargs = dict(generator=torch.Generator(device=execution_device).manual_seed(0))
 
         num_view = len(control_images) // 2
         normal_image = [[control_images[i] for i in range(num_view)]]
@@ -98,8 +107,13 @@ class multiviewDiffusionNet:
         kwargs["images_position"] = position_image
 
         if hasattr(self.pipeline.unet, "use_dino") and self.pipeline.unet.use_dino:
+            if self.cpu_offload:
+                self.dino_v2.to(execution_device)
             dino_hidden_states = self.dino_v2(input_images[0])
             kwargs["dino_hidden_states"] = dino_hidden_states
+            if self.cpu_offload:
+                self.dino_v2.to("cpu")
+                torch.cuda.empty_cache()
 
         sync_condition = None
 

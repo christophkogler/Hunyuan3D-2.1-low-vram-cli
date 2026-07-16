@@ -35,8 +35,12 @@ diffusers_logging.set_verbosity(50)
 
 
 class Hunyuan3DPaintConfig:
-    def __init__(self, max_num_view, resolution):
+    def __init__(self, max_num_view, resolution, cpu_offload=False):
         self.device = "cuda"
+        # Keep the diffusion model in system RAM and move its components to the
+        # GPU just before they run. This makes the PBR pipeline usable on GPUs
+        # with less than the 21 GB required for the fully resident model.
+        self.cpu_offload = cpu_offload
 
         self.multiview_cfg_path = "hy3dpaint/cfgs/hunyuan-paint-pbr.yaml"
         self.custom_pipeline = "hunyuanpaintpbr"
