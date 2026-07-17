@@ -3,15 +3,18 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import importlib
 import importlib.metadata
+import io
 import json
 import os
 import shutil
+import subprocess
 import sys
 import traceback
 import urllib.request
 from pathlib import Path
-from typing import TextIO
+from typing import Any, TextIO
 
 ROOT = Path(__file__).resolve().parents[2]
 MODEL_REVISIONS = {
@@ -20,6 +23,101 @@ MODEL_REVISIONS = {
 }
 REAL_ESRGAN_URL = "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth"
 SCHEMA_VERSION = 1
+GIB = 1024**3
+MIN_WORKFLOW_VRAM = 10 * GIB
+
+# Keep these paths as the single source of truth for both `models status` and
+# the doctor report. Each entry is a required readiness file for that component.
+MODEL_DEFINITIONS = {
+    "shape": {
+        "files": ("models/tencent/Hunyuan3D-2.1/hunyuan3d-dit-v2-1/model.fp16.ckpt",),
+        "pull_component": "shape",
+    },
+    "texture": {
+        "files": (
+            "models/tencent/Hunyuan3D-2.1/hunyuan3d-paintpbr-v2-1/unet/diffusion_pytorch_model.bin",
+        ),
+        "pull_component": "texture",
+    },
+    "dino": {
+        "files": ("models/facebook/dinov2-giant/config.json",),
+        "pull_component": "texture",
+    },
+    "realesrgan": {
+        "files": ("realesrgan/RealESRGAN_x4plus.pth",),
+        "pull_component": "texture",
+    },
+    "rembg": {
+        "files": ("rembg/u2net.onnx",),
+        "pull_component": "prepare",
+    },
+}
+
+DEPENDENCY_DEFINITIONS = {
+    "prepare": {
+        "pillow": "PIL",
+        "rembg": "rembg",
+    },
+    "shape": {
+        "shape_pipeline": "hy3dshape.pipelines",
+    },
+    "texture": {
+        "texture_pipeline": "textureGenPipeline",
+        "basicsr": "basicsr",
+        "cupy": "cupy",
+        "open3d": "open3d",
+        "pymeshlab": "pymeshlab",
+        "pytorch_lightning": "pytorch_lightning",
+        "realesrgan": "realesrgan",
+        "scipy": "scipy",
+        "xatlas": "xatlas",
+    },
+}
+
+NATIVE_EXTENSION_DEFINITIONS = {
+    "custom_rasterizer": "custom_rasterizer_kernel",
+    "mesh_inpaint": "DifferentiableRenderer.mesh_inpaint_processor",
+}
+
+WORKFLOW_DEFINITIONS = {
+    "prepare": {
+        "command": "prepare",
+        "models": ("rembg",),
+        "dependencies": ("prepare",),
+        "requires_cuda": False,
+        "min_vram": None,
+    },
+    "shape": {
+        "command": "shape",
+        "models": ("shape",),
+        "dependencies": ("shape",),
+        "requires_cuda": True,
+        "min_vram": MIN_WORKFLOW_VRAM,
+    },
+    "texture": {
+        "command": "texture",
+        "models": ("texture", "dino", "realesrgan"),
+        "dependencies": ("texture",),
+        "requires_cuda": True,
+        "min_vram": MIN_WORKFLOW_VRAM,
+        "native_extensions": tuple(NATIVE_EXTENSION_DEFINITIONS),
+    },
+    "generate_shape_only": {
+        "command": "generate --shape-only",
+        "models": ("rembg", "shape"),
+        "dependencies": ("prepare", "shape"),
+        "requires_cuda": True,
+        "min_vram": MIN_WORKFLOW_VRAM,
+    },
+    "generate": {
+        "command": "generate",
+        "models": ("rembg", "shape", "texture", "dino", "realesrgan"),
+        "dependencies": ("prepare", "shape", "texture"),
+        "requires_cuda": True,
+        "min_vram": MIN_WORKFLOW_VRAM,
+        "native_extensions": tuple(NATIVE_EXTENSION_DEFINITIONS),
+    },
+}
 
 
 class CliError(Exception):
@@ -219,15 +317,346 @@ def texture(mesh: Path, image: Path, output: Path, cache: Path) -> Path:
     return output.with_suffix(".obj")
 
 
+def model_readiness(cache: Path) -> dict:
+    """Return detailed, read-only readiness for every cached model component."""
+    readiness = {}
+    for component, definition in MODEL_DEFINITIONS.items():
+        paths = [cache / relative_path for relative_path in definition["files"]]
+        missing = [str(path) for path in paths if not path.is_file()]
+        readiness[component] = {
+            "ready": not missing,
+            "files": [str(path) for path in paths],
+            "missing": missing,
+            "pull_component": definition["pull_component"],
+        }
+    return readiness
+
+
 def model_status(cache: Path) -> dict:
-    root = cache / "models/tencent/Hunyuan3D-2.1"
+    """Return the existing compact model status contract."""
     return {
-        "shape": (root / "hunyuan3d-dit-v2-1/model.fp16.ckpt").is_file(),
-        "texture": (root / "hunyuan3d-paintpbr-v2-1/unet/diffusion_pytorch_model.bin").is_file(),
-        "dino": (cache / "models/facebook/dinov2-giant/config.json").is_file(),
-        "realesrgan": (cache / "realesrgan/RealESRGAN_x4plus.pth").is_file(),
-        "rembg": (cache / "rembg/u2net.onnx").is_file(),
+        component: details["ready"]
+        for component, details in model_readiness(cache).items()
     }
+
+
+def probe_import(module_name: str) -> dict:
+    """Import a module without allowing its diagnostics to corrupt JSON output."""
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            importlib.import_module(module_name)
+    except Exception as error:
+        return {
+            "ready": False,
+            "module": module_name,
+            "error": str(error),
+            "exception": type(error).__name__,
+        }
+    return {"ready": True, "module": module_name}
+
+
+def dependency_status() -> dict:
+    """Probe runtime dependencies without constructing pipelines or loading models."""
+    legacy_paths()
+    status = {}
+    for group, definitions in DEPENDENCY_DEFINITIONS.items():
+        checks = {
+            name: probe_import(module_name) for name, module_name in definitions.items()
+        }
+        status[group] = {
+            "ready": all(check["ready"] for check in checks.values()),
+            "checks": checks,
+        }
+    return status
+
+
+def native_extension_status() -> dict:
+    """Probe the compiled extensions used by the texture renderer."""
+    legacy_paths()
+    return {
+        name: probe_import(module_name)
+        for name, module_name in NATIVE_EXTENSION_DEFINITIONS.items()
+    }
+
+
+def driver_version() -> str | None:
+    command = shutil.which("nvidia-smi")
+    if command is None:
+        return None
+    try:
+        result = subprocess.run(
+            [command, "--query-gpu=driver_version", "--format=csv,noheader,nounits"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    return next(
+        (line.strip() for line in result.stdout.splitlines() if line.strip()), None
+    )
+
+
+def gpu_status() -> dict:
+    """Collect GPU facts without changing CUDA state or creating cache files."""
+    status: dict[str, Any] = {
+        "available": False,
+        "visible": os.environ.get("CUDA_VISIBLE_DEVICES") not in {"", "-1"},
+        "count": 0,
+        "name": None,
+        "driver_version": driver_version(),
+        "torch_version": None,
+        "torch_cuda_version": None,
+        "nvcc": shutil.which("nvcc"),
+        "available_vram_bytes": None,
+        "total_vram_bytes": None,
+    }
+    try:
+        import torch
+    except Exception as error:
+        status["error"] = {"exception": type(error).__name__, "message": str(error)}
+        return status
+
+    status["torch_version"] = getattr(torch, "__version__", None)
+    status["torch_cuda_version"] = getattr(
+        getattr(torch, "version", None), "cuda", None
+    )
+    try:
+        status["available"] = bool(torch.cuda.is_available())
+    except Exception as error:
+        status["error"] = {"exception": type(error).__name__, "message": str(error)}
+        return status
+    if not status["available"]:
+        return status
+
+    status["visible"] = True
+    try:
+        status["count"] = int(torch.cuda.device_count())
+    except Exception as error:
+        status["error"] = {"exception": type(error).__name__, "message": str(error)}
+        status["available"] = False
+        return status
+    if status["count"] == 0:
+        status["available"] = False
+        return status
+
+    try:
+        properties = torch.cuda.get_device_properties(0)
+        status["name"] = getattr(
+            properties, "name", None
+        ) or torch.cuda.get_device_name(0)
+        status["total_vram_bytes"] = int(properties.total_memory)
+    except Exception as error:
+        status["error"] = {"exception": type(error).__name__, "message": str(error)}
+        status["available"] = False
+        return status
+    try:
+        available, total = torch.cuda.mem_get_info(0)
+        status["available_vram_bytes"] = int(available)
+        status["total_vram_bytes"] = int(total)
+    except (AttributeError, RuntimeError, TypeError):
+        # Older or mocked torch builds may not expose mem_get_info. Total VRAM
+        # still gives the agent a useful capability decision.
+        pass
+    return status
+
+
+def disk_status(path: Path) -> dict:
+    """Inspect the nearest existing parent so a missing cache is not created."""
+    requested = path.expanduser()
+    checked = requested
+    while not checked.exists() and checked != checked.parent:
+        checked = checked.parent
+    try:
+        usage = shutil.disk_usage(checked)
+    except OSError as error:
+        return {
+            "path": str(requested),
+            "checked_path": str(checked),
+            "available": False,
+            "error": {"exception": type(error).__name__, "message": str(error)},
+        }
+    return {
+        "path": str(requested),
+        "checked_path": str(checked),
+        "available": True,
+        "free_bytes": int(usage.free),
+        "total_bytes": int(usage.total),
+    }
+
+
+def _blocker(
+    code: str,
+    message: str,
+    remediation: str,
+    details: dict | None = None,
+    next_command: str | None = None,
+) -> dict:
+    result = {"code": code, "message": message, "remediation": remediation}
+    if details is not None:
+        result["details"] = details
+    if next_command is not None:
+        result["next_command"] = next_command
+    return result
+
+
+def workflow_status(
+    gpu: dict, models: dict, dependencies: dict, native_extensions: dict
+) -> dict:
+    """Build actionable readiness decisions from the independent doctor probes."""
+    workflows = {}
+    for workflow, definition in WORKFLOW_DEFINITIONS.items():
+        blockers = []
+        next_commands = []
+        model_checks = {
+            component: models[component]["ready"] for component in definition["models"]
+        }
+        dependency_checks = {
+            group: dependencies[group]["ready"] for group in definition["dependencies"]
+        }
+        native_checks = {
+            name: native_extensions[name]["ready"]
+            for name in definition.get("native_extensions", ())
+        }
+
+        for component in definition["models"]:
+            if model_checks[component]:
+                continue
+            pull_component = models[component]["pull_component"]
+            blocker = _blocker(
+                "missing_model",
+                f"The {component} model component is not ready.",
+                f"Download the {pull_component} model assets into the selected cache.",
+                {"component": component, "missing_files": models[component]["missing"]},
+                f"hunyuan3d models pull --components {pull_component}",
+            )
+            blockers.append(blocker)
+            next_commands.append(blocker["next_command"])
+
+        for group in definition["dependencies"]:
+            for name, check in dependencies[group]["checks"].items():
+                if check["ready"]:
+                    continue
+                blocker = _blocker(
+                    "missing_dependency",
+                    f"The {name} dependency is not importable.",
+                    "Install the selected CLI profile and its locked dependencies.",
+                    {
+                        "dependency": name,
+                        "module": check["module"],
+                        "error": check.get("error"),
+                    },
+                    "./bootstrap.sh --profile all --install-command"
+                    if workflow in {"texture", "generate"}
+                    else "./bootstrap.sh --profile shape --install-command",
+                )
+                blockers.append(blocker)
+                next_commands.append(blocker["next_command"])
+
+        for name in definition.get("native_extensions", ()):
+            check = native_extensions[name]
+            if check["ready"]:
+                continue
+            blocker = _blocker(
+                "missing_native_extension",
+                f"The {name} native extension is not importable.",
+                "Build the texture profile's native extensions in the active environment.",
+                {
+                    "extension": name,
+                    "module": check["module"],
+                    "error": check.get("error"),
+                },
+                "./bootstrap.sh --profile texture --install-command",
+            )
+            blockers.append(blocker)
+            next_commands.append(blocker["next_command"])
+
+        if definition["requires_cuda"] and not gpu.get("available", False):
+            blocker = _blocker(
+                "cuda_unavailable",
+                "CUDA is not available to the selected PyTorch runtime.",
+                "Use a host with a visible NVIDIA GPU and a CUDA-enabled PyTorch environment.",
+                {
+                    "cuda_visible": gpu.get("visible", False),
+                    "torch_cuda_version": gpu.get("torch_cuda_version"),
+                },
+                "hunyuan3d doctor",
+            )
+            blockers.append(blocker)
+            next_commands.append(blocker["next_command"])
+        elif definition["min_vram"] is not None:
+            available_vram = gpu.get("available_vram_bytes")
+            if available_vram is None:
+                available_vram = gpu.get("total_vram_bytes")
+            if available_vram is not None and available_vram < definition["min_vram"]:
+                blocker = _blocker(
+                    "insufficient_vram",
+                    f"The {workflow} workflow needs more available VRAM than this GPU provides.",
+                    "Free GPU memory or use a GPU with more VRAM; CPU offload is already enabled where supported.",
+                    {
+                        "required_bytes": definition["min_vram"],
+                        "available_bytes": available_vram,
+                        "total_bytes": gpu.get("total_vram_bytes"),
+                    },
+                    "hunyuan3d doctor",
+                )
+                blockers.append(blocker)
+                next_commands.append(blocker["next_command"])
+
+        workflows[workflow] = {
+            "command": definition["command"],
+            "ready": not blockers,
+            "checks": {
+                "models": model_checks,
+                "dependencies": dependency_checks,
+                "native_extensions": native_checks,
+                "cuda": gpu.get("available", False)
+                if definition["requires_cuda"]
+                else True,
+                "minimum_vram_bytes": definition["min_vram"],
+                "available_vram_bytes": gpu.get("available_vram_bytes"),
+            },
+            "blockers": blockers,
+            "next_commands": list(dict.fromkeys(next_commands)),
+        }
+    return workflows
+
+
+def doctor_report(cache: Path, output_dir: Path) -> tuple[dict, int]:
+    """Create the complete read-only preflight report and its exit status."""
+    gpu = gpu_status()
+    models = model_readiness(cache)
+    dependencies = dependency_status()
+    native_extensions = native_extension_status()
+    workflows = workflow_status(gpu, models, dependencies, native_extensions)
+    payload = {
+        "ok": workflows["generate"]["ready"],
+        "cache": str(cache),
+        "output_dir": str(output_dir),
+        # These fields retain the small doctor contract used by existing agents.
+        "cuda": gpu["available"],
+        "nvcc": gpu["nvcc"],
+        "torch": gpu["torch_version"],
+        "torch_cuda": gpu["torch_cuda_version"],
+        "gpu": gpu,
+        "models": {
+            component: details["ready"] for component, details in models.items()
+        },
+        "model_readiness": models,
+        "dependencies": dependencies,
+        "native_extensions": native_extensions,
+        "disk": {"cache": disk_status(cache), "output": disk_status(output_dir)},
+        "workflows": workflows,
+        "readiness": {
+            workflow: details["ready"] for workflow, details in workflows.items()
+        },
+    }
+    return payload, 0 if payload["ok"] else 4
 
 
 def build_parser() -> JsonArgumentParser:
@@ -235,7 +664,8 @@ def build_parser() -> JsonArgumentParser:
     parser.add_argument("--version", action="version", version=package_version())
     parser.add_argument("--cache-dir")
     sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("doctor", add_help=False)
+    doctor = sub.add_parser("doctor", add_help=False)
+    doctor.add_argument("--output-dir", type=Path, default=Path.cwd())
     models = sub.add_parser("models", add_help=False)
     models.add_argument("action", choices=["pull", "status"])
     models.add_argument("--components", default="prepare,shape,texture")
@@ -288,16 +718,10 @@ def main(argv: list[str] | None = None) -> int:
                 invalid = sorted(component for component in components if component not in {"prepare", "shape", "texture"})
                 if invalid:
                     raise CliError("invalid_arguments", "Unknown model component.", 2, {"invalid": invalid})
-            configure_runtime(cache)
             if args.command == "doctor":
-                import torch
-                if not torch.cuda.is_available():
-                    return emit({
-                        "ok": False,
-                        "cache": str(cache),
-                        "error": {"code": "unsupported_runtime", "message": "CUDA is not available."},
-                    }, 4)
-                return emit({"ok": True, "cuda": True, "nvcc": shutil.which("nvcc"), "cache": str(cache), "torch": torch.__version__})
+                report, code = doctor_report(cache, args.output_dir)
+                return emit(report, code)
+            configure_runtime(cache)
             if args.command == "models":
                 if args.action == "pull":
                     return emit({"ok": True, "pulled": pull_models(cache, components), "cache": str(cache)})

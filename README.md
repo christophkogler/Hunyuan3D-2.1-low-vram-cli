@@ -36,8 +36,10 @@ hunyuan3d generate --image ./flower.png --output-dir ./output --shape-only
 Every normal command invocation emits exactly one JSON object on stdout. Progress and tracebacks are written to stderr; `generate` also persists them to `run.log` in its output directory. Failures exit non-zero. Every result includes `schema_version: 1`. Failure payloads use `error.code`, `error.message`, and, when useful, `error.details`. Stable error codes include `invalid_arguments`, `missing_input`, `missing_model_assets`, `unsupported_runtime`, `dependency_failure`, and `generation_failure`.
 
 ```bash
-# Verify GPU visibility, torch build, CUDA compiler, and cache location.
+# Run the read-only capability report before downloading models or inferring.
 hunyuan3d doctor
+# Optionally inspect the filesystem used for generated outputs too.
+hunyuan3d doctor --output-dir ./output
 
 # Inspect or explicitly fetch the pinned model revisions.
 hunyuan3d models status
@@ -57,6 +59,14 @@ hunyuan3d help
 ```
 
 `prepare` removes the background and writes RGBA. Supplying an opaque image directly to `shape` is allowed but usually yields a flat background-shaped mesh, so agents should retain the prepared image. On GPUs below 21 GB VRAM, shape and texture automatically use CPU model offloading; this needs ample system RAM and is slower.
+
+`doctor` reports GPU/CUDA and VRAM facts, importable dependencies and native
+extensions, model component readiness, cache/output disk space, and readiness
+for `prepare`, `shape`, `texture`, `generate --shape-only`, and `generate`.
+Each blocked workflow includes stable blocker codes, remediation, and suggested
+next commands. It does not create cache/output directories or download model
+files. Its exit status is 0 when the full `generate` workflow is ready and 4
+when one or more required capabilities are blocked.
 
 ## Requirements and support boundary
 

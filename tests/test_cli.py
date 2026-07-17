@@ -41,6 +41,163 @@ def test_model_status_uses_the_cli_local_rembg_directory(tmp_path: Path):
     assert cli.model_status(tmp_path)["rembg"] is True
 
 
+def complete_dependency_status() -> dict:
+    return {
+        group: {
+            "ready": True,
+            "checks": {
+                name: {"ready": True, "module": module}
+                for name, module in definitions.items()
+            },
+        }
+        for group, definitions in cli.DEPENDENCY_DEFINITIONS.items()
+    }
+
+
+def complete_native_extension_status() -> dict:
+    return {
+        name: {"ready": True, "module": module}
+        for name, module in cli.NATIVE_EXTENSION_DEFINITIONS.items()
+    }
+
+
+def test_doctor_reports_ready_workflows_from_mocked_probes(tmp_path: Path, monkeypatch):
+    cache = tmp_path / "cache"
+    for definition in cli.MODEL_DEFINITIONS.values():
+        for relative_path in definition["files"]:
+            path = cache / relative_path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.touch()
+
+    monkeypatch.setattr(
+        cli,
+        "gpu_status",
+        lambda: {
+            "available": True,
+            "visible": True,
+            "count": 1,
+            "name": "Mock RTX",
+            "driver_version": "550.54.14",
+            "torch_version": "2.6.0",
+            "torch_cuda_version": "12.4",
+            "nvcc": "/usr/bin/nvcc",
+            "available_vram_bytes": 12 * 1024**3,
+            "total_vram_bytes": 12 * 1024**3,
+        },
+    )
+    monkeypatch.setattr(cli, "dependency_status", complete_dependency_status)
+    monkeypatch.setattr(
+        cli, "native_extension_status", complete_native_extension_status
+    )
+
+    report, code = cli.doctor_report(cache, tmp_path / "output")
+
+    assert code == 0
+    assert report["ok"] is True
+    assert report["gpu"]["name"] == "Mock RTX"
+    assert report["gpu"]["available_vram_bytes"] == 12 * 1024**3
+    assert all(report["readiness"].values())
+    assert report["workflows"]["generate"]["blockers"] == []
+    assert not (tmp_path / "output").exists()
+
+
+def test_doctor_reports_insufficient_vram_as_a_stable_blocker(
+    tmp_path: Path, monkeypatch
+):
+    cache = tmp_path / "cache"
+    for definition in cli.MODEL_DEFINITIONS.values():
+        for relative_path in definition["files"]:
+            path = cache / relative_path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.touch()
+
+    monkeypatch.setattr(
+        cli,
+        "gpu_status",
+        lambda: {
+            "available": True,
+            "visible": True,
+            "count": 1,
+            "name": "Mock GPU",
+            "driver_version": "550.54.14",
+            "torch_version": "2.6.0",
+            "torch_cuda_version": "12.4",
+            "nvcc": "/usr/bin/nvcc",
+            "available_vram_bytes": 8 * 1024**3,
+            "total_vram_bytes": 12 * 1024**3,
+        },
+    )
+    monkeypatch.setattr(cli, "dependency_status", complete_dependency_status)
+    monkeypatch.setattr(
+        cli, "native_extension_status", complete_native_extension_status
+    )
+
+    report, code = cli.doctor_report(cache, tmp_path / "output")
+
+    assert code == 4
+    assert report["workflows"]["shape"]["ready"] is False
+    assert report["workflows"]["shape"]["blockers"][0]["code"] == "insufficient_vram"
+    assert (
+        report["workflows"]["shape"]["blockers"][0]["details"]["required_bytes"]
+        == 10 * 1024**3
+    )
+
+
+def test_doctor_reports_stable_blockers_without_creating_state(
+    tmp_path: Path, monkeypatch
+):
+    cache = tmp_path / "missing-cache"
+    output = tmp_path / "missing-output"
+    dependencies = complete_dependency_status()
+    dependencies["texture"]["ready"] = False
+    dependencies["texture"]["checks"]["xatlas"] = {
+        "ready": False,
+        "module": "xatlas",
+        "error": "No module named 'xatlas'",
+    }
+    native = complete_native_extension_status()
+    native["custom_rasterizer"]["ready"] = False
+    native["custom_rasterizer"]["error"] = "native module unavailable"
+
+    monkeypatch.setattr(
+        cli,
+        "gpu_status",
+        lambda: {
+            "available": False,
+            "visible": False,
+            "count": 0,
+            "name": None,
+            "driver_version": None,
+            "torch_version": "2.6.0",
+            "torch_cuda_version": None,
+            "nvcc": None,
+            "available_vram_bytes": None,
+            "total_vram_bytes": None,
+        },
+    )
+    monkeypatch.setattr(cli, "dependency_status", lambda: dependencies)
+    monkeypatch.setattr(cli, "native_extension_status", lambda: native)
+
+    report, code = cli.doctor_report(cache, output)
+
+    full_codes = {
+        blocker["code"] for blocker in report["workflows"]["generate"]["blockers"]
+    }
+    assert code == 4
+    assert report["ok"] is False
+    assert report["readiness"]["prepare"] is False
+    assert "missing_model" in full_codes
+    assert "missing_dependency" in full_codes
+    assert "missing_native_extension" in full_codes
+    assert "cuda_unavailable" in full_codes
+    assert all(
+        blocker["remediation"]
+        for blocker in report["workflows"]["generate"]["blockers"]
+    )
+    assert not cache.exists()
+    assert not output.exists()
+
+
 def test_configure_runtime_uses_the_selected_cache(monkeypatch, tmp_path: Path):
     monkeypatch.setenv("HF_HOME", "/global/huggingface")
     monkeypatch.setenv("HY3DGEN_MODELS", "/global/models")
