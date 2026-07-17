@@ -21,6 +21,7 @@ def test_model_status_reports_missing_models(tmp_path: Path):
         "texture": False,
         "dino": False,
         "realesrgan": False,
+        "rembg": False,
     }
 
 
@@ -30,6 +31,51 @@ def test_model_status_uses_the_cli_local_dino_directory(tmp_path: Path):
     (dino / "config.json").touch()
 
     assert cli.model_status(tmp_path)["dino"] is True
+
+
+def test_model_status_uses_the_cli_local_rembg_directory(tmp_path: Path):
+    rembg = tmp_path / "rembg"
+    rembg.mkdir()
+    (rembg / "u2net.onnx").touch()
+
+    assert cli.model_status(tmp_path)["rembg"] is True
+
+
+def test_configure_runtime_uses_the_selected_cache(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("HF_HOME", "/global/huggingface")
+    monkeypatch.setenv("HY3DGEN_MODELS", "/global/models")
+    monkeypatch.setenv("U2NET_HOME", "/global/rembg")
+    fake_torch = types.SimpleNamespace(__file__=str(tmp_path / "torch/__init__.py"))
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+    cli.configure_runtime(tmp_path)
+
+    assert os.environ["HF_HOME"] == str(tmp_path / "huggingface")
+    assert os.environ["HY3DGEN_MODELS"] == str(tmp_path / "models")
+    assert os.environ["U2NET_HOME"] == str(tmp_path / "rembg")
+
+
+def test_pull_models_preloads_rembg_into_the_selected_cache(monkeypatch, tmp_path: Path):
+    loaded = []
+
+    class FakeBackgroundRemover:
+        def __init__(self):
+            loaded.append(os.environ["U2NET_HOME"])
+
+    monkeypatch.setattr(cli, "legacy_paths", lambda: None)
+    monkeypatch.setitem(sys.modules, "huggingface_hub", types.SimpleNamespace(snapshot_download=lambda **kwargs: None))
+    monkeypatch.setitem(sys.modules, "hy3dshape.rembg", types.SimpleNamespace(BackgroundRemover=FakeBackgroundRemover))
+    monkeypatch.setenv("U2NET_HOME", str(tmp_path / "rembg"))
+
+    assert cli.pull_models(tmp_path, {"prepare"}) == ["prepare"]
+    assert loaded == [str(tmp_path / "rembg")]
+
+
+def test_prepare_requires_the_cached_background_remover(tmp_path: Path):
+    source = tmp_path / "input.png"
+    source.touch()
+
+    assert cli.main(["--cache-dir", str(tmp_path), "prepare", str(source), "--output", str(tmp_path / "output.png")]) == 3
 
 
 def test_shape_loads_weights_from_the_selected_cache(monkeypatch, tmp_path: Path):
