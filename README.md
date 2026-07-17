@@ -7,22 +7,28 @@ Linux/NVIDIA command-line inference for Hunyuan3D 2.1. The supported interface i
 Install [uv](https://docs.astral.sh/uv/) first, then run:
 
 ```bash
-git clone https://github.com/Tencent-Hunyuan/Hunyuan3D-2.1.git
+git clone https://github.com/christophkogler/Hunyuan3D-2.1-low-vram.git
 cd Hunyuan3D-2.1
 ./bootstrap.sh --profile all
-.venv/bin/hunyuan3d doctor
-.venv/bin/hunyuan3d models pull --components shape,texture
-.venv/bin/hunyuan3d generate --image ./flower.png --output-dir ./output --seed 42
+source .venv/bin/activate
+command -v hunyuan3d
+hunyuan3d --version
+hunyuan3d doctor
+hunyuan3d models pull --components shape,texture
+hunyuan3d generate --image ./flower.png --output-dir ./output --seed 42
 ```
 
-`bootstrap.sh` creates a Python 3.11 environment from the locked dependency graph and, for the `texture` and `all` profiles, compiles the two required CUDA/native extensions. It never downloads model weights. `models pull` does that explicitly and stores them under `.cache/hunyuan3d/` in the clone (or `--cache-dir` / `HUNYUAN3D_CACHE`).
+`bootstrap.sh` creates a Python 3.11 environment from the locked dependency graph and, for the `texture` and `all` profiles, compiles the two required CUDA/native extensions. Activating that environment puts the installed `hunyuan3d` command on `PATH`, so it remains usable after changing directories or in a new shell once activated. It never downloads model weights. `models pull` does that explicitly and stores them under `.cache/hunyuan3d/` in the clone (or `--cache-dir` / `HUNYUAN3D_CACHE`); this default is independent of the caller's current directory.
+
+`hunyuan3d --version` prints the installed `hunyuan3d-cli` package version. Each clone has its own `.venv`: activate the clone you intend to use, then check `command -v hunyuan3d` and `hunyuan3d --version`. Re-run `./bootstrap.sh` in that clone after pulling upgrades; it updates that environment without changing another clone's installation.
 
 The `shape` profile omits the PBR texturing dependencies and native extensions:
 
 ```bash
 ./bootstrap.sh --profile shape
-.venv/bin/hunyuan3d models pull --components shape
-.venv/bin/hunyuan3d generate --image ./flower.png --output-dir ./output --shape-only
+source .venv/bin/activate
+hunyuan3d models pull --components shape
+hunyuan3d generate --image ./flower.png --output-dir ./output --shape-only
 ```
 
 ## CLI contract

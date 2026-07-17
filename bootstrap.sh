@@ -22,4 +22,4 @@ if [[ "$value" != "shape" ]]; then
   suffix="$(uv run --no-sync python -c 'import sysconfig; print(sysconfig.get_config_var("EXT_SUFFIX"))')"
   c++ -O3 -Wall -shared -std=c++11 -fPIC $(uv run --no-sync python -m pybind11 --includes) hy3dpaint/DifferentiableRenderer/mesh_inpaint_processor.cpp -o "hy3dpaint/DifferentiableRenderer/mesh_inpaint_processor${suffix}"
 fi
-echo "Bootstrap complete. Run: .venv/bin/hunyuan3d doctor"
+echo "Bootstrap complete. Activate the environment, then run: source .venv/bin/activate && hunyuan3d doctor"
