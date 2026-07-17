@@ -292,7 +292,11 @@ def main(argv: list[str] | None = None) -> int:
             if args.command == "doctor":
                 import torch
                 if not torch.cuda.is_available():
-                    raise CliError("unsupported_runtime", "CUDA is not available.", 4)
+                    return emit({
+                        "ok": False,
+                        "cache": str(cache),
+                        "error": {"code": "unsupported_runtime", "message": "CUDA is not available."},
+                    }, 4)
                 return emit({"ok": True, "cuda": True, "nvcc": shutil.which("nvcc"), "cache": str(cache), "torch": torch.__version__})
             if args.command == "models":
                 if args.action == "pull":
