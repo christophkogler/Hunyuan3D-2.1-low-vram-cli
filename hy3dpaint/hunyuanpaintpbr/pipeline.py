@@ -271,8 +271,8 @@ class HunyuanPaintPipeline(StableDiffusionPipeline):
                 all_shading_tokens.append(
                     getattr(self.unet, f"learned_text_clip_{token}").unsqueeze(dim=0).repeat(batch_size, 1, 1)
                 )
-            prompt_embeds = torch.stack(all_shading_tokens, dim=1)
-            negative_prompt_embeds = torch.stack(all_shading_tokens, dim=1)
+            prompt_embeds = torch.stack(all_shading_tokens, dim=1).to(self._execution_device)
+            negative_prompt_embeds = torch.stack(all_shading_tokens, dim=1).to(self._execution_device)
             # negative_prompt_embeds = torch.zeros_like(prompt_embeds)
 
         else:
