@@ -18,6 +18,24 @@ MODEL_REVISIONS = {
     "dino": "611a9d42f2335e0f921f1e313ad3c1b7178d206d",
 }
 REAL_ESRGAN_URL = "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth"
+SCHEMA_VERSION = 1
+
+
+class CliError(Exception):
+    """An expected CLI failure that can be represented in the JSON contract."""
+
+    def __init__(self, code: str, message: str, exit_code: int, details: dict | None = None):
+        super().__init__(message)
+        self.code = code
+        self.exit_code = exit_code
+        self.details = details
+
+
+class JsonArgumentParser(argparse.ArgumentParser):
+    """Raise structured errors instead of writing usage text and exiting."""
+
+    def error(self, message: str) -> None:
+        raise CliError("invalid_arguments", message, 2)
 
 
 def package_version() -> str:
@@ -26,8 +44,15 @@ def package_version() -> str:
 
 
 def emit(payload: dict, code: int = 0) -> int:
-    print(json.dumps(payload, sort_keys=True), flush=True)
+    print(json.dumps({"schema_version": SCHEMA_VERSION, **payload}, sort_keys=True), flush=True)
     return code
+
+
+def emit_error(error: CliError) -> int:
+    payload = {"code": error.code, "message": str(error)}
+    if error.details is not None:
+        payload["details"] = error.details
+    return emit({"ok": False, "error": payload}, error.exit_code)
 
 
 def cache_root(value: str | None) -> Path:
@@ -52,6 +77,38 @@ def configure_runtime(cache: Path) -> None:
     torch_lib = Path(torch.__file__).resolve().parent / "lib"
     if torch_lib.exists():
         os.environ["LD_LIBRARY_PATH"] = ":".join(filter(None, [str(torch_lib), os.environ.get("LD_LIBRARY_PATH")]))
+
+
+def require_cuda() -> None:
+    import torch
+    if not torch.cuda.is_available():
+        raise CliError(
+            "unsupported_runtime",
+            "CUDA is required for generation but is not available.",
+            4,
+        )
+
+
+def require_file(path: Path, argument: str) -> None:
+    if not path.is_file():
+        raise CliError(
+            "missing_input",
+            f"{argument} does not exist or is not a file: {path}",
+            3,
+            {"argument": argument, "path": str(path)},
+        )
+
+
+def require_model_assets(cache: Path, components: set[str]) -> None:
+    available = model_status(cache)
+    missing = sorted(component for component in components if not available[component])
+    if missing:
+        raise CliError(
+            "missing_model_assets",
+            "Required model assets are missing. Run `hunyuan3d models pull` first.",
+            3,
+            {"missing": missing, "cache": str(cache)},
+        )
 
 
 def prepare_image(source: Path, destination: Path) -> Path:
@@ -124,51 +181,82 @@ def model_status(cache: Path) -> dict:
     }
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="hunyuan3d")
+def build_parser() -> JsonArgumentParser:
+    parser = JsonArgumentParser(prog="hunyuan3d", add_help=False)
     parser.add_argument("--version", action="version", version=package_version())
     parser.add_argument("--cache-dir")
     sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("doctor")
-    models = sub.add_parser("models")
+    sub.add_parser("doctor", add_help=False)
+    models = sub.add_parser("models", add_help=False)
     models.add_argument("action", choices=["pull", "status"])
     models.add_argument("--components", default="shape,texture")
-    prep = sub.add_parser("prepare")
+    prep = sub.add_parser("prepare", add_help=False)
     prep.add_argument("image", type=Path)
     prep.add_argument("--output", type=Path, required=True)
-    shape_cmd = sub.add_parser("shape")
+    shape_cmd = sub.add_parser("shape", add_help=False)
     shape_cmd.add_argument("--image", type=Path, required=True)
     shape_cmd.add_argument("--output", type=Path, required=True)
     shape_cmd.add_argument("--steps", type=int, default=50)
     shape_cmd.add_argument("--seed", type=int)
-    texture_cmd = sub.add_parser("texture")
+    texture_cmd = sub.add_parser("texture", add_help=False)
     texture_cmd.add_argument("--mesh", type=Path, required=True)
     texture_cmd.add_argument("--image", type=Path, required=True)
     texture_cmd.add_argument("--output", type=Path, required=True)
-    generate = sub.add_parser("generate")
+    generate = sub.add_parser("generate", add_help=False)
     generate.add_argument("--image", type=Path, required=True)
     generate.add_argument("--output-dir", type=Path, required=True)
     generate.add_argument("--shape-only", action="store_true")
     generate.add_argument("--steps", type=int, default=50)
     generate.add_argument("--seed", type=int)
-    args = parser.parse_args(argv)
+    sub.add_parser("help", add_help=False)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
     try:
+        args = parser.parse_args(argv)
+        if args.command == "help":
+            parser.print_help()
+            return 0
         cache = cache_root(args.cache_dir)
+        if args.command == "prepare":
+            require_file(args.image, "image")
+        elif args.command == "shape":
+            require_file(args.image, "--image")
+        elif args.command == "texture":
+            require_file(args.mesh, "--mesh")
+            require_file(args.image, "--image")
+        elif args.command == "generate":
+            require_file(args.image, "--image")
+        if args.command == "models":
+            components = set(args.components.split(","))
+            invalid = sorted(component for component in components if component not in {"shape", "texture"})
+            if invalid:
+                raise CliError("invalid_arguments", "Unknown model component.", 2, {"invalid": invalid})
         configure_runtime(cache)
         if args.command == "doctor":
             import torch
-            return emit({"ok": torch.cuda.is_available(), "cuda": torch.cuda.is_available(), "nvcc": shutil.which("nvcc"), "cache": str(cache), "torch": torch.__version__}, 0 if torch.cuda.is_available() else 2)
+            if not torch.cuda.is_available():
+                raise CliError("unsupported_runtime", "CUDA is not available.", 4)
+            return emit({"ok": True, "cuda": True, "nvcc": shutil.which("nvcc"), "cache": str(cache), "torch": torch.__version__})
         if args.command == "models":
-            components = set(args.components.split(","))
             if args.action == "pull":
                 return emit({"ok": True, "pulled": pull_models(cache, components), "cache": str(cache)})
             return emit({"ok": True, "cache": str(cache), "models": model_status(cache)})
         if args.command == "prepare":
             return emit({"ok": True, "image": str(prepare_image(args.image, args.output))})
         if args.command == "shape":
+            require_cuda()
+            require_model_assets(cache, {"shape"})
             return emit({"ok": True, "shape": str(shape(args.image, args.output, cache, args.steps, args.seed))})
         if args.command == "texture":
+            require_cuda()
+            require_model_assets(cache, {"texture", "dino", "realesrgan"})
             return emit({"ok": True, "texture": str(texture(args.mesh, args.image, args.output, cache))})
+        require_cuda()
+        required_models = {"shape"} if args.shape_only else {"shape", "texture", "dino", "realesrgan"}
+        require_model_assets(cache, required_models)
         prepared = args.output_dir / "input.rgba.png"
         prepare_image(args.image, prepared)
         glb = shape(prepared, args.output_dir / "shape.glb", cache, args.steps, args.seed)
@@ -176,9 +264,13 @@ def main(argv: list[str] | None = None) -> int:
         if not args.shape_only:
             result["texture"] = str(texture(glb, prepared, args.output_dir / "textured", cache))
         return emit(result)
+    except CliError as error:
+        return emit_error(error)
+    except (ImportError, ModuleNotFoundError) as error:
+        return emit_error(CliError("dependency_failure", str(error), 5))
     except Exception as error:
         traceback.print_exc(file=sys.stderr)
-        return emit({"ok": False, "error": type(error).__name__, "message": str(error)}, 1)
+        return emit_error(CliError("generation_failure", str(error), 1, {"exception": type(error).__name__}))
 
 
 if __name__ == "__main__":
