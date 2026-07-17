@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import importlib.metadata
 import json
 import os
 import shutil
@@ -17,6 +18,11 @@ MODEL_REVISIONS = {
     "dino": "611a9d42f2335e0f921f1e313ad3c1b7178d206d",
 }
 REAL_ESRGAN_URL = "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth"
+
+
+def package_version() -> str:
+    """Return the version of the installed CLI distribution."""
+    return importlib.metadata.version("hunyuan3d-cli")
 
 
 def emit(payload: dict, code: int = 0) -> int:
@@ -120,6 +126,7 @@ def model_status(cache: Path) -> dict:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="hunyuan3d")
+    parser.add_argument("--version", action="version", version=package_version())
     parser.add_argument("--cache-dir")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("doctor")
