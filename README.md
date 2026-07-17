@@ -8,9 +8,10 @@ Install [uv](https://docs.astral.sh/uv/) first, then run:
 
 ```bash
 git clone https://github.com/christophkogler/Hunyuan3D-2.1-low-vram.git
-cd Hunyuan3D-2.1
-./bootstrap.sh --profile all
-source .venv/bin/activate
+cd Hunyuan3D-2.1-low-vram
+./bootstrap.sh --profile all --install-command
+
+# Open a new Bash terminal, then run these from any directory.
 command -v hunyuan3d
 hunyuan3d --version
 hunyuan3d doctor
@@ -18,15 +19,14 @@ hunyuan3d models pull --components shape,texture
 hunyuan3d generate --image ./flower.png --output-dir ./output --seed 42
 ```
 
-`bootstrap.sh` creates a Python 3.11 environment from the locked dependency graph and, for the `texture` and `all` profiles, compiles the two required CUDA/native extensions. Activating that environment puts the installed `hunyuan3d` command on `PATH`, so it remains usable after changing directories or in a new shell once activated. It never downloads model weights. `models pull` does that explicitly and stores them under `.cache/hunyuan3d/` in the clone (or `--cache-dir` / `HUNYUAN3D_CACHE`); this default is independent of the caller's current directory.
+`bootstrap.sh` creates a Python 3.11 environment from the locked dependency graph and, for the `texture` and `all` profiles, compiles the two required CUDA/native extensions. Passing `--install-command` installs a user-local `hunyuan3d` command in `~/.local/bin` and adds that directory to `~/.bashrc` when needed. After opening a new Bash terminal, the command is available from any directory without activating the project environment. It never downloads model weights. `models pull` does that explicitly and stores them under `.cache/hunyuan3d/` in the clone (or `--cache-dir` / `HUNYUAN3D_CACHE`); this default is independent of the caller's current directory.
 
-`hunyuan3d --version` prints the installed `hunyuan3d-cli` package version. Each clone has its own `.venv`: activate the clone you intend to use, then check `command -v hunyuan3d` and `hunyuan3d --version`. Re-run `./bootstrap.sh` in that clone after pulling upgrades; it updates that environment without changing another clone's installation.
+`hunyuan3d --version` prints the installed `hunyuan3d-cli` package version. The user-local command points to the most recently installed clone; running `./bootstrap.sh --profile <profile> --install-command` in another clone deliberately changes that command to use the new clone. Re-run the same command after pulling upgrades to update both that clone's environment and the persistent command.
 
 The `shape` profile omits the PBR texturing dependencies and native extensions:
 
 ```bash
-./bootstrap.sh --profile shape
-source .venv/bin/activate
+./bootstrap.sh --profile shape --install-command
 hunyuan3d models pull --components shape
 hunyuan3d generate --image ./flower.png --output-dir ./output --shape-only
 ```

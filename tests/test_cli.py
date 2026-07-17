@@ -47,3 +47,28 @@ def test_installed_cli_is_available_from_another_directory(tmp_path: Path):
 
     assert doctor.returncode in {0, 2}
     assert json.loads(doctor.stdout)["cache"] == str(cli.ROOT / ".cache/hunyuan3d")
+
+
+def test_persistent_command_installer_runs_the_cli_from_another_directory(tmp_path: Path):
+    command_dir = tmp_path / "bin"
+    shell_rc = tmp_path / "bashrc"
+    env = {
+        **os.environ,
+        "HUNYUAN3D_COMMAND_DIR": str(command_dir),
+        "HUNYUAN3D_SHELL_RC": str(shell_rc),
+    }
+    subprocess.run([Path(__file__).parents[1] / "install-command.sh"], env=env, check=True)
+
+    assert (command_dir / "hunyuan3d").is_file()
+    assert f'export PATH="{command_dir}:$PATH"' in shell_rc.read_text()
+    command_env = {**env, "PATH": f"{command_dir}{os.pathsep}{os.environ['PATH']}"}
+    version = subprocess.run(
+        ["hunyuan3d", "--version"],
+        cwd=tmp_path,
+        env=command_env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert version.stdout.strip() == cli.package_version()
