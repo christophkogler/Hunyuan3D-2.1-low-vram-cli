@@ -35,7 +35,7 @@ dependencies = [
 texture = [
   "basicsr>=1.4,<2", "cupy-cuda12x>=13,<14", "open3d>=0.18,<1",
   "ninja>=1.11,<2", "pybind11>=2.13,<3", "pymeshlab>=2022.2", "pytorch-lightning>=1.9,<2",
-  "realesrgan>=0.3,<1", "scipy>=1.11,<2", "xatlas>=0.0.9,<1",
+  "realesrgan>=0.3,<1", "scipy>=1.11,<2", "setuptools>=70,<81", "xatlas>=0.0.9,<1",
 ]
 dev = ["pytest>=8,<9", "ruff>=0.9,<1"]
 
