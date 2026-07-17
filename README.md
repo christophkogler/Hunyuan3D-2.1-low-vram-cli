@@ -33,7 +33,7 @@ hunyuan3d generate --image ./flower.png --output-dir ./output --shape-only
 
 ## CLI contract
 
-Every normal command invocation emits exactly one JSON object on stdout. Progress and tracebacks are written to stderr; `generate` also persists them to `run.log` in its output directory. Failures exit non-zero. Every result includes `schema_version: 1`. Failure payloads use `error.code`, `error.message`, and, when useful, `error.details`. Stable error codes include `invalid_arguments`, `missing_input`, `invalid_input`, `invalid_output`, `output_conflict`, `missing_model_assets`, `unsupported_runtime`, `dependency_failure`, and `generation_failure`.
+Every normal command invocation emits exactly one JSON object on stdout. Lifecycle and progress events are emitted as JSON Lines on stderr; `generate` also persists those events, runtime diagnostics, and any failure traceback to `run.log` in its output directory. Failures exit non-zero. Every result includes `schema_version: 1`. Failure payloads use `error.code`, `error.message`, and, when useful, `error.details`. Stable error codes include `invalid_arguments`, `missing_input`, `invalid_input`, `invalid_output`, `output_conflict`, `missing_model_assets`, `unsupported_runtime`, `dependency_failure`, and `generation_failure`.
 
 ```bash
 # Run the read-only capability report before downloading models or inferring.
@@ -77,6 +77,38 @@ Each blocked workflow includes stable blocker codes, remediation, and suggested
 next commands. It does not create cache/output directories or download model
 files. Its exit status is 0 when the full `generate` workflow is ready and 4
 when one or more required capabilities are blocked.
+
+### Progress event stream
+
+For every normal command except the explicit human-readable `help` path, stderr
+is a JSON Lines stream. Each event has this stable envelope:
+
+```json
+{
+  "schema_version": 1,
+  "event": "stage_started",
+  "run_id": "6f6c7e25-2c74-4cd0-9a31-5a5c1e7fce9a",
+  "stage": "shape",
+  "timestamp": "2026-01-01T00:00:00.000000Z",
+  "elapsed_seconds": 12.345678
+}
+```
+
+The current event names are `run_started`, `stage_started`, `progress`,
+`stage_completed`, `stage_failed`, `run_completed`, and `run_failed`.
+`progress` adds integer `current` and `total` counters. Stage events include
+applicable input, output, cache, and component paths; the composite `generate`
+stage contains nested `prepare`, `shape`, and, unless `--shape-only` is used,
+`texture` stages. Model pulls report one progress counter per selected model
+component. Failure events contain only a bounded, redacted exception type,
+message, and CLI error code when available; tracebacks are kept in `run.log`,
+not in the event payload.
+
+Consumers should parse stderr one line at a time, group records by `run_id`,
+ignore unknown event names or fields, and continue to parse stdout as the
+single final-result object. The event envelope and existing stdout result
+contract are versioned independently through the same `schema_version: 1`
+compatibility marker.
 
 ## Requirements and support boundary
 
