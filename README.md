@@ -33,7 +33,7 @@ hunyuan3d generate --image ./flower.png --output-dir ./output --shape-only
 
 ## CLI contract
 
-Every successful command emits one JSON object on stdout. Progress and failures are written to stderr; a failure also emits an `{"ok": false, ...}` object and exits non-zero.
+Every normal command invocation emits exactly one JSON object on stdout. Progress and tracebacks are written to stderr; failures exit non-zero. Every result includes `schema_version: 1`. Failure payloads use `error.code`, `error.message`, and, when useful, `error.details`. Stable error codes include `invalid_arguments`, `missing_input`, `missing_model_assets`, `unsupported_runtime`, `dependency_failure`, and `generation_failure`.
 
 ```bash
 # Verify GPU visibility, torch build, CUDA compiler, and cache location.
@@ -51,6 +51,9 @@ hunyuan3d texture --image work/flower.rgba.png --mesh work/shape.glb --output wo
 
 # The convenience path: prepare → shape → texture.
 hunyuan3d generate --image flower.png --output-dir output --seed 42
+
+# Human-readable usage is available separately.
+hunyuan3d help
 ```
 
 `prepare` removes the background and writes RGBA. Supplying an opaque image directly to `shape` is allowed but usually yields a flat background-shaped mesh, so agents should retain the prepared image. On GPUs below 21 GB VRAM, shape and texture automatically use CPU model offloading; this needs ample system RAM and is slower.

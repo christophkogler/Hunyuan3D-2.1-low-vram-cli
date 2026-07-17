@@ -4,6 +4,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from hunyuan3d import cli
 
 
@@ -45,8 +47,10 @@ def test_installed_cli_is_available_from_another_directory(tmp_path: Path):
         text=True,
     )
 
-    assert doctor.returncode in {0, 2}
-    assert json.loads(doctor.stdout)["cache"] == str(cli.ROOT / ".cache/hunyuan3d")
+    assert doctor.returncode in {0, 4}
+    doctor_payload = json.loads(doctor.stdout)
+    assert doctor_payload["schema_version"] == 1
+    assert doctor_payload["cache"] == str(cli.ROOT / ".cache/hunyuan3d")
 
 
 def test_persistent_command_installer_runs_the_cli_from_another_directory(tmp_path: Path):
@@ -72,3 +76,63 @@ def test_persistent_command_installer_runs_the_cli_from_another_directory(tmp_pa
     )
 
     assert version.stdout.strip() == cli.package_version()
+
+
+def run_cli(*args: str) -> subprocess.CompletedProcess[str]:
+    executable = Path(sys.executable).with_name("hunyuan3d")
+    return subprocess.run([executable, *args], text=True, capture_output=True, check=False)
+
+
+def json_result(result: subprocess.CompletedProcess[str]) -> dict:
+    assert result.stderr == ""
+    return json.loads(result.stdout)
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ("not-a-command",),
+        ("shape", "--image", "input.png"),
+        ("shape", "--image", "input.png", "--output", "output.glb", "--steps", "not-a-number"),
+    ],
+)
+def test_parse_failures_are_versioned_json_errors(arguments: tuple[str, ...]):
+    result = run_cli(*arguments)
+    assert result.returncode == 2
+    payload = json_result(result)
+    assert payload["schema_version"] == 1
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "invalid_arguments"
+
+
+def test_missing_input_is_a_versioned_json_error(tmp_path: Path):
+    result = run_cli("prepare", str(tmp_path / "missing.png"), "--output", str(tmp_path / "output.png"))
+    assert result.returncode == 3
+    payload = json_result(result)
+    assert payload["schema_version"] == 1
+    assert payload["error"]["code"] == "missing_input"
+    assert payload["error"]["details"]["argument"] == "image"
+
+
+def test_invalid_model_component_is_a_versioned_json_error():
+    result = run_cli("models", "status", "--components", "unknown")
+    assert result.returncode == 2
+    assert json_result(result)["error"] == {
+        "code": "invalid_arguments",
+        "message": "Unknown model component.",
+        "details": {"invalid": ["unknown"]},
+    }
+
+
+def test_success_result_is_versioned_json():
+    result = run_cli("models", "status")
+    assert result.returncode == 0
+    payload = json_result(result)
+    assert payload["schema_version"] == 1
+    assert payload["ok"] is True
+
+
+def test_help_remains_available_as_an_explicit_human_path():
+    result = run_cli("help")
+    assert result.returncode == 0
+    assert result.stdout.startswith("usage: hunyuan3d")
