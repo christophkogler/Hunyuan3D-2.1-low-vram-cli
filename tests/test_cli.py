@@ -6,6 +6,7 @@ import types
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 from hunyuan3d import cli
 
@@ -230,7 +231,7 @@ def test_pull_models_preloads_rembg_into_the_selected_cache(monkeypatch, tmp_pat
 
 def test_prepare_requires_the_cached_background_remover(tmp_path: Path):
     source = tmp_path / "input.png"
-    source.touch()
+    Image.new("RGB", (1, 1), "white").save(source)
 
     assert cli.main(["--cache-dir", str(tmp_path), "prepare", str(source), "--output", str(tmp_path / "output.png")]) == 3
 
@@ -466,6 +467,147 @@ def test_invalid_model_component_is_a_versioned_json_error():
     }
 
 
+@pytest.mark.parametrize("components", ["", ",", "shape,,texture", "shape,shape"])
+def test_invalid_model_component_selections_fail_without_pulling(components: str):
+    result = run_cli("models", "pull", "--components", components)
+
+    assert result.returncode == 2
+    payload = json_result(result)
+    assert payload["schema_version"] == 1
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "invalid_arguments"
+
+
+def test_unreadable_image_fails_before_runtime_setup(tmp_path: Path, monkeypatch, capsys):
+    source = tmp_path / "input.png"
+    source.write_text("not an image")
+    output = tmp_path / "output.png"
+
+    monkeypatch.setattr(cli, "configure_runtime", lambda _cache: pytest.fail("runtime was configured"))
+
+    assert cli.main(["prepare", str(source), "--output", str(output)]) == 3
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["error"]["code"] == "invalid_input"
+    assert not output.exists()
+
+
+def test_invalid_steps_fail_before_runtime_setup(tmp_path: Path, monkeypatch, capsys):
+    source = tmp_path / "input.png"
+    Image.new("RGB", (1, 1), "white").save(source)
+    output = tmp_path / "shape.glb"
+
+    monkeypatch.setattr(cli, "configure_runtime", lambda _cache: pytest.fail("runtime was configured"))
+
+    assert cli.main(["shape", "--image", str(source), "--output", str(output), "--steps", "0"]) == 2
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["error"]["code"] == "invalid_arguments"
+    assert not output.exists()
+
+
+def test_unsupported_mesh_format_fails_before_runtime_setup(tmp_path: Path, monkeypatch, capsys):
+    mesh = tmp_path / "mesh.txt"
+    mesh.write_text("not a mesh")
+    image = tmp_path / "input.png"
+    Image.new("RGB", (1, 1), "white").save(image)
+
+    monkeypatch.setattr(cli, "configure_runtime", lambda _cache: pytest.fail("runtime was configured"))
+
+    assert cli.main([
+        "texture", "--mesh", str(mesh), "--image", str(image), "--output", str(tmp_path / "textured")
+    ]) == 3
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["error"]["code"] == "invalid_input"
+
+
+def test_generate_rejects_partial_output_plan_before_runtime_setup(tmp_path: Path, monkeypatch, capsys):
+    source = tmp_path / "input.png"
+    Image.new("RGB", (1, 1), "white").save(source)
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    existing = output_dir / "shape.glb"
+    existing.write_text("existing")
+
+    monkeypatch.setattr(cli, "configure_runtime", lambda _cache: pytest.fail("runtime was configured"))
+
+    assert cli.main(["generate", "--image", str(source), "--output-dir", str(output_dir), "--shape-only"]) == 3
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["error"]["code"] == "output_conflict"
+    assert str(existing) in payload["error"]["details"]["paths"]
+    assert not (output_dir / "run.log").exists()
+
+
+def test_generate_write_plan_includes_texture_artifacts(tmp_path: Path):
+    planned = {path.name for path in cli.generate_write_plan(tmp_path / "output", False)}
+
+    assert planned == {
+        "input.rgba.png",
+        "shape.glb",
+        "run.log",
+        "white_mesh_remesh.obj",
+        "textured.obj",
+        "textured.mtl",
+        "textured.jpg",
+        "textured_metallic.jpg",
+        "textured_roughness.jpg",
+    }
+
+
+def test_overwrite_allows_an_existing_direct_output(tmp_path: Path, monkeypatch, capsys):
+    source = tmp_path / "input.png"
+    Image.new("RGB", (1, 1), "white").save(source)
+    output = tmp_path / "output.png"
+    output.write_text("old")
+
+    monkeypatch.setattr(cli, "configure_runtime", lambda _cache: None)
+    monkeypatch.setattr(cli, "require_model_assets", lambda _cache, _components: None)
+
+    def fake_prepare(_source: Path, destination: Path) -> Path:
+        destination.write_text("new")
+        return destination
+
+    monkeypatch.setattr(cli, "prepare_image", fake_prepare)
+
+    assert cli.main([
+        "prepare", str(source), "--output", str(output), "--overwrite"
+    ]) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["ok"] is True
+    assert output.read_text() == "new"
+
+
+def test_overwrite_does_not_treat_an_output_directory_as_a_file(tmp_path: Path, capsys):
+    source = tmp_path / "input.png"
+    Image.new("RGB", (1, 1), "white").save(source)
+    output = tmp_path / "output.png"
+    output.mkdir()
+
+    assert cli.main([
+        "prepare", str(source), "--output", str(output), "--overwrite"
+    ]) == 3
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["error"]["code"] == "invalid_output"
+
+
+def test_output_parent_must_be_a_directory(tmp_path: Path, capsys):
+    source = tmp_path / "input.png"
+    Image.new("RGB", (1, 1), "white").save(source)
+    output_parent = tmp_path / "not-a-directory"
+    output_parent.write_text("file")
+
+    assert cli.main([
+        "generate", "--image", str(source), "--output-dir", str(output_parent), "--shape-only"
+    ]) == 3
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["error"]["code"] == "invalid_output"
+
+
 def test_success_result_is_versioned_json():
     result = run_cli("models", "status")
     assert result.returncode == 0
@@ -476,7 +618,7 @@ def test_success_result_is_versioned_json():
 
 def test_generate_writes_runtime_log_and_keeps_stdout_json(tmp_path: Path, monkeypatch, capsys):
     source = tmp_path / "input.png"
-    source.touch()
+    Image.new("RGB", (1, 1), "white").save(source)
     output_dir = tmp_path / "output"
 
     monkeypatch.setattr(cli, "configure_runtime", lambda cache: None)
@@ -509,7 +651,7 @@ def test_generate_writes_runtime_log_and_keeps_stdout_json(tmp_path: Path, monke
 
 def test_generate_runtime_log_retains_traceback(tmp_path: Path, monkeypatch, capsys):
     source = tmp_path / "input.png"
-    source.touch()
+    Image.new("RGB", (1, 1), "white").save(source)
     output_dir = tmp_path / "output"
 
     monkeypatch.setattr(cli, "configure_runtime", lambda cache: None)

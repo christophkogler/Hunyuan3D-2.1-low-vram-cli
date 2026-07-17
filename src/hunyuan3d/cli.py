@@ -25,6 +25,11 @@ REAL_ESRGAN_URL = "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1
 SCHEMA_VERSION = 1
 GIB = 1024**3
 MIN_WORKFLOW_VRAM = 10 * GIB
+VALID_MODEL_COMPONENTS = frozenset({"prepare", "shape", "texture"})
+SUPPORTED_MESH_EXTENSIONS = frozenset(
+    {".3ds", ".dae", ".fbx", ".glb", ".gltf", ".obj", ".off", ".ply", ".stl", ".x3d"}
+)
+MIN_STEPS = 1
 
 # Keep these paths as the single source of truth for both `models status` and
 # the doctor report. Each entry is a required readiness file for that component.
@@ -230,6 +235,199 @@ def require_file(path: Path, argument: str) -> None:
             3,
             {"argument": argument, "path": str(path)},
         )
+
+
+def require_readable_image(path: Path, argument: str) -> None:
+    """Validate an image without constructing any inference pipeline."""
+    require_file(path, argument)
+    try:
+        from PIL import Image
+
+        with Image.open(path) as image:
+            image.verify()
+    except (OSError, SyntaxError, ValueError) as error:
+        raise CliError(
+            "invalid_input",
+            f"{argument} is not a readable image: {path}",
+            3,
+            {"argument": argument, "path": str(path), "reason": str(error)},
+        ) from error
+
+
+def require_supported_mesh(path: Path, argument: str) -> None:
+    """Validate a mesh path before the texture runtime is imported."""
+    require_file(path, argument)
+    extension = path.suffix.lower()
+    if extension not in SUPPORTED_MESH_EXTENSIONS:
+        raise CliError(
+            "invalid_input",
+            f"{argument} has an unsupported mesh format: {path.suffix or '<none>'}",
+            3,
+            {
+                "argument": argument,
+                "path": str(path),
+                "extension": extension,
+                "supported_formats": sorted(SUPPORTED_MESH_EXTENSIONS),
+            },
+        )
+
+
+def require_valid_steps(steps: int) -> None:
+    if steps < MIN_STEPS:
+        raise CliError(
+            "invalid_arguments",
+            f"--steps must be at least {MIN_STEPS}.",
+            2,
+            {"argument": "--steps", "value": steps, "minimum": MIN_STEPS},
+        )
+
+
+def parse_model_components(value: str) -> set[str]:
+    """Parse and strictly validate the comma-separated model component list."""
+    raw_components = [component.strip() for component in value.split(",")]
+    if not value.strip() or any(not component for component in raw_components):
+        raise CliError(
+            "invalid_arguments",
+            "--components must contain one or more non-empty component names.",
+            2,
+            {"argument": "--components", "value": value},
+        )
+
+    duplicates = sorted(
+        component
+        for component in set(raw_components)
+        if raw_components.count(component) > 1
+    )
+    if duplicates:
+        raise CliError(
+            "invalid_arguments",
+            "Duplicate model components are not allowed.",
+            2,
+            {"argument": "--components", "duplicates": duplicates},
+        )
+
+    invalid = sorted(set(raw_components) - VALID_MODEL_COMPONENTS)
+    if invalid:
+        raise CliError(
+            "invalid_arguments",
+            "Unknown model component.",
+            2,
+            {"invalid": invalid},
+        )
+    return set(raw_components)
+
+
+def planned_texture_outputs(output: Path) -> list[Path]:
+    """Return files written by the checked-in OBJ texture exporter."""
+    mesh = output.with_suffix(".obj")
+    return [
+        mesh,
+        mesh.with_suffix(".mtl"),
+        mesh.with_suffix(".jpg"),
+        mesh.with_name(f"{mesh.stem}_metallic.jpg"),
+        mesh.with_name(f"{mesh.stem}_roughness.jpg"),
+    ]
+
+
+def texture_write_plan(mesh: Path, output: Path) -> list[Path]:
+    """Include the remesh intermediate as well as all predictable final files."""
+    return [mesh.parent / "white_mesh_remesh.obj", *planned_texture_outputs(output)]
+
+
+def generate_write_plan(output_dir: Path, shape_only: bool) -> list[Path]:
+    paths = [
+        output_dir / "input.rgba.png",
+        output_dir / "shape.glb",
+        output_dir / "run.log",
+    ]
+    if not shape_only:
+        paths.extend(texture_write_plan(output_dir / "shape.glb", output_dir / "textured"))
+    return paths
+
+
+def _path_exists_including_broken_symlinks(path: Path) -> bool:
+    return os.path.lexists(path)
+
+
+def validate_output_plan(paths: list[Path], overwrite: bool) -> None:
+    """Validate all output parents and collisions before runtime setup."""
+    unique_paths = list(dict.fromkeys(paths))
+    for path in unique_paths:
+        parent = path.parent
+        if parent.exists() and not parent.is_dir():
+            raise CliError(
+                "invalid_output",
+                f"Output parent is not a directory: {parent}",
+                3,
+                {"path": str(path), "parent": str(parent)},
+            )
+
+        checked = parent
+        while not checked.exists() and checked != checked.parent:
+            checked = checked.parent
+        if not checked.is_dir() or not os.access(checked, os.W_OK | os.X_OK):
+            raise CliError(
+                "invalid_output",
+                f"Output parent is not writable: {parent}",
+                3,
+                {"path": str(path), "parent": str(parent), "checked_path": str(checked)},
+            )
+
+    colliding_paths = [
+        path for path in unique_paths if _path_exists_including_broken_symlinks(path)
+    ]
+    non_file_collisions = [
+        str(path)
+        for path in colliding_paths
+        if path.is_symlink() or not path.is_file()
+    ]
+    if non_file_collisions and overwrite:
+        raise CliError(
+            "invalid_output",
+            "Planned output paths must be files when --overwrite is used.",
+            3,
+            {"paths": non_file_collisions},
+        )
+
+    collisions = [str(path) for path in colliding_paths]
+    if collisions and not overwrite:
+        raise CliError(
+            "output_conflict",
+            "One or more planned output files already exist. Pass --overwrite to replace them.",
+            3,
+            {
+                "paths": collisions,
+                "planned_outputs": [str(path) for path in unique_paths],
+                "overwrite_flag": "--overwrite",
+            },
+        )
+
+
+def validate_command(args: argparse.Namespace) -> set[str] | None:
+    """Perform all deterministic validation before importing runtime dependencies."""
+    if args.command == "models":
+        return parse_model_components(args.components)
+    if args.command == "doctor" or args.command == "help":
+        return None
+
+    if args.command == "prepare":
+        require_readable_image(args.image, "image")
+        validate_output_plan([args.output], args.overwrite)
+    elif args.command == "shape":
+        require_readable_image(args.image, "--image")
+        require_valid_steps(args.steps)
+        validate_output_plan([args.output], args.overwrite)
+    elif args.command == "texture":
+        require_supported_mesh(args.mesh, "--mesh")
+        require_readable_image(args.image, "--image")
+        validate_output_plan(texture_write_plan(args.mesh, args.output), args.overwrite)
+    elif args.command == "generate":
+        require_readable_image(args.image, "--image")
+        require_valid_steps(args.steps)
+        validate_output_plan(
+            generate_write_plan(args.output_dir, args.shape_only), args.overwrite
+        )
+    return None
 
 
 def require_model_assets(cache: Path, components: set[str]) -> None:
@@ -672,23 +870,64 @@ def build_parser() -> JsonArgumentParser:
     prep = sub.add_parser("prepare", add_help=False)
     prep.add_argument("image", type=Path)
     prep.add_argument("--output", type=Path, required=True)
+    prep.add_argument("--overwrite", action="store_true")
     shape_cmd = sub.add_parser("shape", add_help=False)
     shape_cmd.add_argument("--image", type=Path, required=True)
     shape_cmd.add_argument("--output", type=Path, required=True)
     shape_cmd.add_argument("--steps", type=int, default=50)
     shape_cmd.add_argument("--seed", type=int)
+    shape_cmd.add_argument("--overwrite", action="store_true")
     texture_cmd = sub.add_parser("texture", add_help=False)
     texture_cmd.add_argument("--mesh", type=Path, required=True)
     texture_cmd.add_argument("--image", type=Path, required=True)
     texture_cmd.add_argument("--output", type=Path, required=True)
+    texture_cmd.add_argument("--overwrite", action="store_true")
     generate = sub.add_parser("generate", add_help=False)
     generate.add_argument("--image", type=Path, required=True)
     generate.add_argument("--output-dir", type=Path, required=True)
     generate.add_argument("--shape-only", action="store_true")
     generate.add_argument("--steps", type=int, default=50)
     generate.add_argument("--seed", type=int)
+    generate.add_argument("--overwrite", action="store_true")
     sub.add_parser("help", add_help=False)
     return parser
+
+
+def run_command(args: argparse.Namespace, cache: Path, components: set[str] | None) -> int:
+    configure_runtime(cache)
+    if args.command == "models":
+        if args.action == "pull":
+            return emit({"ok": True, "pulled": pull_models(cache, components or set()), "cache": str(cache)})
+        return emit({"ok": True, "cache": str(cache), "models": model_status(cache)})
+    if args.command == "prepare":
+        require_model_assets(cache, {"rembg"})
+        return emit({"ok": True, "image": str(prepare_image(args.image, args.output))})
+    if args.command == "shape":
+        require_cuda()
+        require_model_assets(cache, {"shape"})
+        return emit({"ok": True, "shape": str(shape(args.image, args.output, cache, args.steps, args.seed))})
+    if args.command == "texture":
+        require_cuda()
+        require_model_assets(cache, {"texture", "dino", "realesrgan"})
+        return emit({"ok": True, "texture": str(texture(args.mesh, args.image, args.output, cache))})
+
+    require_cuda()
+    required_models = (
+        {"rembg", "shape"}
+        if args.shape_only
+        else {"rembg", "shape", "texture", "dino", "realesrgan"}
+    )
+    require_model_assets(cache, required_models)
+    prepared = args.output_dir / "input.rgba.png"
+    print("Preparing image...", file=sys.stderr, flush=True)
+    prepare_image(args.image, prepared)
+    print("Generating shape...", file=sys.stderr, flush=True)
+    glb = shape(prepared, args.output_dir / "shape.glb", cache, args.steps, args.seed)
+    result = {"ok": True, "input": str(prepared), "shape": str(glb)}
+    if not args.shape_only:
+        print("Generating texture...", file=sys.stderr, flush=True)
+        result["texture"] = str(texture(glb, prepared, args.output_dir / "textured", cache))
+    return emit(result)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -699,63 +938,29 @@ def main(argv: list[str] | None = None) -> int:
         return emit_error(error)
 
     try:
-        with generate_runtime_log(args):
-            if args.command == "help":
-                parser.print_help()
-                return 0
-            cache = cache_root(args.cache_dir)
-            if args.command == "prepare":
-                require_file(args.image, "image")
-            elif args.command == "shape":
-                require_file(args.image, "--image")
-            elif args.command == "texture":
-                require_file(args.mesh, "--mesh")
-                require_file(args.image, "--image")
-            elif args.command == "generate":
-                require_file(args.image, "--image")
-            if args.command == "models":
-                components = set(args.components.split(","))
-                invalid = sorted(component for component in components if component not in {"prepare", "shape", "texture"})
-                if invalid:
-                    raise CliError("invalid_arguments", "Unknown model component.", 2, {"invalid": invalid})
-            if args.command == "doctor":
-                report, code = doctor_report(cache, args.output_dir)
-                return emit(report, code)
-            configure_runtime(cache)
-            if args.command == "models":
-                if args.action == "pull":
-                    return emit({"ok": True, "pulled": pull_models(cache, components), "cache": str(cache)})
-                return emit({"ok": True, "cache": str(cache), "models": model_status(cache)})
-            if args.command == "prepare":
-                require_model_assets(cache, {"rembg"})
-                return emit({"ok": True, "image": str(prepare_image(args.image, args.output))})
-            if args.command == "shape":
-                require_cuda()
-                require_model_assets(cache, {"shape"})
-                return emit({"ok": True, "shape": str(shape(args.image, args.output, cache, args.steps, args.seed))})
-            if args.command == "texture":
-                require_cuda()
-                require_model_assets(cache, {"texture", "dino", "realesrgan"})
-                return emit({"ok": True, "texture": str(texture(args.mesh, args.image, args.output, cache))})
-            require_cuda()
-            required_models = {"rembg", "shape"} if args.shape_only else {"rembg", "shape", "texture", "dino", "realesrgan"}
-            require_model_assets(cache, required_models)
-            prepared = args.output_dir / "input.rgba.png"
-            print("Preparing image...", file=sys.stderr, flush=True)
-            prepare_image(args.image, prepared)
-            print("Generating shape...", file=sys.stderr, flush=True)
-            glb = shape(prepared, args.output_dir / "shape.glb", cache, args.steps, args.seed)
-            result = {"ok": True, "input": str(prepared), "shape": str(glb)}
-            if not args.shape_only:
-                print("Generating texture...", file=sys.stderr, flush=True)
-                result["texture"] = str(texture(glb, prepared, args.output_dir / "textured", cache))
-            return emit(result)
+        if args.command == "help":
+            parser.print_help()
+            return 0
+
+        cache = cache_root(args.cache_dir)
+        components = validate_command(args)
+        if args.command == "doctor":
+            report, code = doctor_report(cache, args.output_dir)
+            return emit(report, code)
+
+        # Validation completes before this context creates the output directory
+        # or runtime log. Invalid requests therefore cannot mutate output state.
+        if args.command == "generate":
+            with generate_runtime_log(args):
+                return run_command(args, cache, components)
+        return run_command(args, cache, components)
     except CliError as error:
         return emit_error(error)
     except (ImportError, ModuleNotFoundError) as error:
         return emit_error(CliError("dependency_failure", str(error), 5))
     except Exception as error:
         if args.command == "generate":
+            args.output_dir.mkdir(parents=True, exist_ok=True)
             with (args.output_dir / "run.log").open("a", encoding="utf-8") as log:
                 traceback.print_exc(file=StderrTee(sys.stderr, log))
         else:
