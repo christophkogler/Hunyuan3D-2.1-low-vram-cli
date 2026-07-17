@@ -1,4 +1,5 @@
 """Stable JSON CLI around the repository's shape and texture engines."""
+
 from __future__ import annotations
 
 import argparse
@@ -8,11 +9,15 @@ import importlib.metadata
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
+import time
 import traceback
 import urllib.request
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TextIO
 
@@ -23,6 +28,14 @@ MODEL_REVISIONS = {
 }
 REAL_ESRGAN_URL = "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth"
 SCHEMA_VERSION = 1
+EVENT_MESSAGE_LIMIT = 500
+STAGE_MESSAGES = {
+    "generate": "Generating asset...",
+    "model_pull": "Pulling model assets...",
+    "prepare": "Preparing image...",
+    "shape": "Generating shape...",
+    "texture": "Generating texture...",
+}
 GIB = 1024**3
 MIN_WORKFLOW_VRAM = 10 * GIB
 VALID_MODEL_COMPONENTS = frozenset({"prepare", "shape", "texture"})
@@ -128,7 +141,9 @@ WORKFLOW_DEFINITIONS = {
 class CliError(Exception):
     """An expected CLI failure that can be represented in the JSON contract."""
 
-    def __init__(self, code: str, message: str, exit_code: int, details: dict | None = None):
+    def __init__(
+        self, code: str, message: str, exit_code: int, details: dict | None = None
+    ):
         super().__init__(message)
         self.code = code
         self.exit_code = exit_code
@@ -148,47 +163,142 @@ def package_version() -> str:
 
 
 def emit(payload: dict, code: int = 0) -> int:
-    print(json.dumps({"schema_version": SCHEMA_VERSION, **payload}, sort_keys=True), flush=True)
+    print(
+        json.dumps({"schema_version": SCHEMA_VERSION, **payload}, sort_keys=True),
+        flush=True,
+    )
     return code
 
 
-def emit_error(error: CliError) -> int:
+def error_result(error: CliError) -> dict:
     payload = {"code": error.code, "message": str(error)}
     if error.details is not None:
         payload["details"] = error.details
-    return emit({"ok": False, "error": payload}, error.exit_code)
+    return {"ok": False, "error": payload}
 
 
-class StderrTee:
-    """Write diagnostic output to the terminal and a generate runtime log."""
+def emit_error(error: CliError) -> int:
+    return emit(error_result(error), error.exit_code)
 
-    def __init__(self, *streams: TextIO):
-        self.streams = streams
 
-    def write(self, value: str) -> int:
-        for stream in self.streams:
-            stream.write(value)
-        return len(value)
+_SECRET_PATTERN = re.compile(
+    r"(?i)\b(api[_-]?key|access[_-]?token|refresh[_-]?token|authorization|password|secret|token)\b"
+    r"(\s*[:=]\s*)(?:bearer\s+)?\S+"
+)
 
-    def flush(self) -> None:
-        for stream in self.streams:
-            stream.flush()
 
-    def __getattr__(self, name: str):
-        return getattr(self.streams[0], name)
+def _event_message(value: str) -> str:
+    """Bound and redact exception text before putting it in an event."""
+    redacted = _SECRET_PATTERN.sub(r"\1\2[REDACTED]", value)
+    if len(redacted) > EVENT_MESSAGE_LIMIT:
+        return f"{redacted[: EVENT_MESSAGE_LIMIT - 3]}..."
+    return redacted
+
+
+class ProgressReporter:
+    """Emit bounded, machine-readable lifecycle events for one CLI run."""
+
+    def __init__(self, command: str, stream: TextIO):
+        self.command = command
+        self.stream = stream
+        self.log_stream: TextIO | None = None
+        self.run_id = str(uuid.uuid4())
+        self.started = time.monotonic()
+
+    def _write(self, payload: dict) -> None:
+        line = json.dumps(payload, sort_keys=True)
+        print(line, file=self.stream, flush=True)
+        if self.log_stream is not None and self.log_stream is not self.stream:
+            print(line, file=self.log_stream, flush=True)
+
+    def event(self, name: str, stage: str | None = None, **fields: Any) -> None:
+        payload = {
+            "schema_version": SCHEMA_VERSION,
+            "event": name,
+            "run_id": self.run_id,
+            "stage": stage,
+            "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "elapsed_seconds": round(time.monotonic() - self.started, 6),
+            **fields,
+        }
+        self._write(payload)
+
+    @staticmethod
+    def error_payload(error: Exception) -> dict:
+        payload = {
+            "type": type(error).__name__,
+            "message": _event_message(str(error)),
+        }
+        if isinstance(error, CliError):
+            payload["code"] = error.code
+        return payload
+
+    def run_started(self) -> None:
+        self.event("run_started", command=self.command)
+
+    def run_completed(self) -> None:
+        self.event("run_completed", command=self.command)
+
+    def run_failed(self, error: Exception) -> None:
+        self.event("run_failed", command=self.command, error=self.error_payload(error))
+
+    def progress(self, stage: str, current: int, total: int, **fields: Any) -> None:
+        self.event(
+            "progress",
+            stage=stage,
+            current=current,
+            total=total,
+            **fields,
+        )
+
+    @contextlib.contextmanager
+    def stage(self, name: str, progress_total: int = 1, **details: Any):
+        started = time.monotonic()
+        stage_details = {"message": STAGE_MESSAGES.get(name, name), **details}
+        self.event("stage_started", stage=name, **stage_details)
+        self.progress(name, 0, progress_total)
+        try:
+            yield
+        except Exception as error:
+            self.event(
+                "stage_failed",
+                stage=name,
+                duration_seconds=round(time.monotonic() - started, 6),
+                error=self.error_payload(error),
+                **stage_details,
+            )
+            raise
+        else:
+            self.progress(name, progress_total, progress_total)
+            self.event(
+                "stage_completed",
+                stage=name,
+                duration_seconds=round(time.monotonic() - started, 6),
+                **stage_details,
+            )
 
 
 @contextlib.contextmanager
-def generate_runtime_log(args: argparse.Namespace):
-    """Mirror generate diagnostics to a per-invocation log once its directory is known."""
-    if args.command != "generate":
-        yield
+def command_output(args: argparse.Namespace, reporter: ProgressReporter):
+    """Capture runtime chatter away from the JSONL stderr event stream."""
+    if args.command == "generate":
+        args.output_dir.mkdir(parents=True, exist_ok=True)
+        with (args.output_dir / "run.log").open("w", encoding="utf-8") as log:
+            previous_log = reporter.log_stream
+            reporter.log_stream = log
+            try:
+                with contextlib.redirect_stdout(log), contextlib.redirect_stderr(log):
+                    yield log
+            finally:
+                reporter.log_stream = previous_log
         return
 
-    args.output_dir.mkdir(parents=True, exist_ok=True)
-    with (args.output_dir / "run.log").open("w", encoding="utf-8") as log:
-        with contextlib.redirect_stderr(StderrTee(sys.stderr, log)):
-            yield
+    diagnostics = io.StringIO()
+    with (
+        contextlib.redirect_stdout(diagnostics),
+        contextlib.redirect_stderr(diagnostics),
+    ):
+        yield diagnostics
 
 
 def cache_root(value: str | None) -> Path:
@@ -196,7 +306,12 @@ def cache_root(value: str | None) -> Path:
 
 
 def legacy_paths() -> None:
-    for path in (ROOT, ROOT / "hy3dshape", ROOT / "hy3dpaint", ROOT / "hy3dpaint/custom_rasterizer"):
+    for path in (
+        ROOT,
+        ROOT / "hy3dshape",
+        ROOT / "hy3dpaint",
+        ROOT / "hy3dpaint/custom_rasterizer",
+    ):
         if str(path) not in sys.path:
             sys.path.insert(0, str(path))
 
@@ -212,13 +327,17 @@ def configure_runtime(cache: Path) -> None:
     # rasterizer extension, including on distributions without a global CUDA
     # runtime linker path.
     import torch
+
     torch_lib = Path(torch.__file__).resolve().parent / "lib"
     if torch_lib.exists():
-        os.environ["LD_LIBRARY_PATH"] = ":".join(filter(None, [str(torch_lib), os.environ.get("LD_LIBRARY_PATH")]))
+        os.environ["LD_LIBRARY_PATH"] = ":".join(
+            filter(None, [str(torch_lib), os.environ.get("LD_LIBRARY_PATH")])
+        )
 
 
 def require_cuda() -> None:
     import torch
+
     if not torch.cuda.is_available():
         raise CliError(
             "unsupported_runtime",
@@ -341,7 +460,9 @@ def generate_write_plan(output_dir: Path, shape_only: bool) -> list[Path]:
         output_dir / "run.log",
     ]
     if not shape_only:
-        paths.extend(texture_write_plan(output_dir / "shape.glb", output_dir / "textured"))
+        paths.extend(
+            texture_write_plan(output_dir / "shape.glb", output_dir / "textured")
+        )
     return paths
 
 
@@ -370,16 +491,18 @@ def validate_output_plan(paths: list[Path], overwrite: bool) -> None:
                 "invalid_output",
                 f"Output parent is not writable: {parent}",
                 3,
-                {"path": str(path), "parent": str(parent), "checked_path": str(checked)},
+                {
+                    "path": str(path),
+                    "parent": str(parent),
+                    "checked_path": str(checked),
+                },
             )
 
     colliding_paths = [
         path for path in unique_paths if _path_exists_including_broken_symlinks(path)
     ]
     non_file_collisions = [
-        str(path)
-        for path in colliding_paths
-        if path.is_symlink() or not path.is_file()
+        str(path) for path in colliding_paths if path.is_symlink() or not path.is_file()
     ]
     if non_file_collisions and overwrite:
         raise CliError(
@@ -446,6 +569,7 @@ def prepare_image(source: Path, destination: Path) -> Path:
     legacy_paths()
     from PIL import Image
     from hy3dshape.rembg import BackgroundRemover
+
     with contextlib.redirect_stdout(sys.stderr):
         result = BackgroundRemover()(Image.open(source).convert("RGB")).convert("RGBA")
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -453,32 +577,64 @@ def prepare_image(source: Path, destination: Path) -> Path:
     return destination
 
 
-def pull_models(cache: Path, components: set[str]) -> list[str]:
+def pull_models(
+    cache: Path,
+    components: set[str],
+    reporter: ProgressReporter | None = None,
+) -> list[str]:
     from huggingface_hub import snapshot_download
+
     pulled = []
+    ordered_components = [
+        component
+        for component in ("shape", "prepare", "texture")
+        if component in components
+    ]
     if "shape" in components:
-        snapshot_download("tencent/Hunyuan3D-2.1", revision=MODEL_REVISIONS["hunyuan"],
-                          allow_patterns=["hunyuan3d-dit-v2-1/*"],
-                          local_dir=cache / "models/tencent/Hunyuan3D-2.1")
+        snapshot_download(
+            "tencent/Hunyuan3D-2.1",
+            revision=MODEL_REVISIONS["hunyuan"],
+            allow_patterns=["hunyuan3d-dit-v2-1/*"],
+            local_dir=cache / "models/tencent/Hunyuan3D-2.1",
+        )
         pulled.append("shape")
+        if reporter is not None:
+            reporter.progress(
+                "model_pull", len(pulled), len(ordered_components), component="shape"
+            )
     if "prepare" in components:
         legacy_paths()
         from hy3dshape.rembg import BackgroundRemover
+
         # Constructing the rembg session downloads U²-Net into U2NET_HOME.
         # configure_runtime() points that environment variable at this cache.
         BackgroundRemover()
         pulled.append("prepare")
+        if reporter is not None:
+            reporter.progress(
+                "model_pull", len(pulled), len(ordered_components), component="prepare"
+            )
     if "texture" in components:
-        snapshot_download("tencent/Hunyuan3D-2.1", revision=MODEL_REVISIONS["hunyuan"],
-                          allow_patterns=["hunyuan3d-paintpbr-v2-1/*"],
-                          local_dir=cache / "models/tencent/Hunyuan3D-2.1")
-        snapshot_download("facebook/dinov2-giant", revision=MODEL_REVISIONS["dino"],
-                          local_dir=cache / "models/facebook/dinov2-giant")
+        snapshot_download(
+            "tencent/Hunyuan3D-2.1",
+            revision=MODEL_REVISIONS["hunyuan"],
+            allow_patterns=["hunyuan3d-paintpbr-v2-1/*"],
+            local_dir=cache / "models/tencent/Hunyuan3D-2.1",
+        )
+        snapshot_download(
+            "facebook/dinov2-giant",
+            revision=MODEL_REVISIONS["dino"],
+            local_dir=cache / "models/facebook/dinov2-giant",
+        )
         checkpoint = cache / "realesrgan/RealESRGAN_x4plus.pth"
         checkpoint.parent.mkdir(parents=True, exist_ok=True)
         if not checkpoint.exists():
             urllib.request.urlretrieve(REAL_ESRGAN_URL, checkpoint)
         pulled.append("texture")
+        if reporter is not None:
+            reporter.progress(
+                "model_pull", len(pulled), len(ordered_components), component="texture"
+            )
     return pulled
 
 
@@ -486,13 +642,18 @@ def shape(image: Path, output: Path, cache: Path, steps: int, seed: int | None) 
     legacy_paths()
     import torch
     from hy3dshape.pipelines import Hunyuan3DDiTFlowMatchingPipeline
+
     with contextlib.redirect_stdout(sys.stderr):
         pipe = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(
             str(cache / "models/tencent/Hunyuan3D-2.1")
         )
         if torch.cuda.get_device_properties(0).total_memory < 21 * 1024**3:
             pipe.enable_model_cpu_offload(device="cuda")
-        generator = torch.Generator(device=pipe._execution_device).manual_seed(seed) if seed is not None else None
+        generator = (
+            torch.Generator(device=pipe._execution_device).manual_seed(seed)
+            if seed is not None
+            else None
+        )
         mesh = pipe(image=str(image), num_inference_steps=steps, generator=generator)[0]
     output.parent.mkdir(parents=True, exist_ok=True)
     mesh.export(output)
@@ -502,8 +663,10 @@ def shape(image: Path, output: Path, cache: Path, steps: int, seed: int | None) 
 def texture(mesh: Path, image: Path, output: Path, cache: Path) -> Path:
     legacy_paths()
     from torchvision_fix import apply_fix
+
     apply_fix()
     from textureGenPipeline import Hunyuan3DPaintConfig, Hunyuan3DPaintPipeline
+
     config = Hunyuan3DPaintConfig(max_num_view=6, resolution=512, cpu_offload=True)
     config.multiview_pretrained_path = str(cache / "models/tencent/Hunyuan3D-2.1")
     config.dino_ckpt_path = str(cache / "models/facebook/dinov2-giant")
@@ -511,7 +674,12 @@ def texture(mesh: Path, image: Path, output: Path, cache: Path) -> Path:
     config.realesrgan_ckpt_path = str(cache / "realesrgan/RealESRGAN_x4plus.pth")
     with contextlib.redirect_stdout(sys.stderr):
         pipeline = Hunyuan3DPaintPipeline(config)
-        pipeline(mesh_path=str(mesh), image_path=str(image), output_mesh_path=str(output.with_suffix(".obj")), save_glb=False)
+        pipeline(
+            mesh_path=str(mesh),
+            image_path=str(image),
+            output_mesh_path=str(output.with_suffix(".obj")),
+            save_glb=False,
+        )
     return output.with_suffix(".obj")
 
 
@@ -893,41 +1061,82 @@ def build_parser() -> JsonArgumentParser:
     return parser
 
 
-def run_command(args: argparse.Namespace, cache: Path, components: set[str] | None) -> int:
+def run_command(
+    args: argparse.Namespace,
+    cache: Path,
+    components: set[str] | None,
+    reporter: ProgressReporter,
+) -> tuple[dict, int]:
     configure_runtime(cache)
     if args.command == "models":
         if args.action == "pull":
-            return emit({"ok": True, "pulled": pull_models(cache, components or set()), "cache": str(cache)})
-        return emit({"ok": True, "cache": str(cache), "models": model_status(cache)})
+            selected = components or set()
+            with reporter.stage(
+                "model_pull",
+                progress_total=len(selected),
+                cache=str(cache),
+                components=sorted(selected),
+            ):
+                pulled = pull_models(cache, selected, reporter)
+            return {"ok": True, "pulled": pulled, "cache": str(cache)}, 0
+        return {"ok": True, "cache": str(cache), "models": model_status(cache)}, 0
     if args.command == "prepare":
-        require_model_assets(cache, {"rembg"})
-        return emit({"ok": True, "image": str(prepare_image(args.image, args.output))})
+        with reporter.stage("prepare", input=str(args.image), output=str(args.output)):
+            require_model_assets(cache, {"rembg"})
+            output = prepare_image(args.image, args.output)
+        return {"ok": True, "image": str(output)}, 0
     if args.command == "shape":
-        require_cuda()
-        require_model_assets(cache, {"shape"})
-        return emit({"ok": True, "shape": str(shape(args.image, args.output, cache, args.steps, args.seed))})
+        with reporter.stage(
+            "shape",
+            input=str(args.image),
+            output=str(args.output),
+            steps=args.steps,
+        ):
+            require_cuda()
+            require_model_assets(cache, {"shape"})
+            output = shape(args.image, args.output, cache, args.steps, args.seed)
+        return {"ok": True, "shape": str(output)}, 0
     if args.command == "texture":
-        require_cuda()
-        require_model_assets(cache, {"texture", "dino", "realesrgan"})
-        return emit({"ok": True, "texture": str(texture(args.mesh, args.image, args.output, cache))})
+        with reporter.stage(
+            "texture",
+            input=str(args.image),
+            mesh=str(args.mesh),
+            output=str(args.output),
+        ):
+            require_cuda()
+            require_model_assets(cache, {"texture", "dino", "realesrgan"})
+            output = texture(args.mesh, args.image, args.output, cache)
+        return {"ok": True, "texture": str(output)}, 0
 
-    require_cuda()
-    required_models = (
-        {"rembg", "shape"}
-        if args.shape_only
-        else {"rembg", "shape", "texture", "dino", "realesrgan"}
-    )
-    require_model_assets(cache, required_models)
-    prepared = args.output_dir / "input.rgba.png"
-    print("Preparing image...", file=sys.stderr, flush=True)
-    prepare_image(args.image, prepared)
-    print("Generating shape...", file=sys.stderr, flush=True)
-    glb = shape(prepared, args.output_dir / "shape.glb", cache, args.steps, args.seed)
-    result = {"ok": True, "input": str(prepared), "shape": str(glb)}
-    if not args.shape_only:
-        print("Generating texture...", file=sys.stderr, flush=True)
-        result["texture"] = str(texture(glb, prepared, args.output_dir / "textured", cache))
-    return emit(result)
+    with reporter.stage(
+        "generate", output_dir=str(args.output_dir), shape_only=args.shape_only
+    ):
+        require_cuda()
+        required_models = (
+            {"rembg", "shape"}
+            if args.shape_only
+            else {"rembg", "shape", "texture", "dino", "realesrgan"}
+        )
+        require_model_assets(cache, required_models)
+        prepared = args.output_dir / "input.rgba.png"
+        with reporter.stage("prepare", input=str(args.image), output=str(prepared)):
+            prepare_image(args.image, prepared)
+        shape_output = args.output_dir / "shape.glb"
+        with reporter.stage(
+            "shape", input=str(prepared), output=str(shape_output), steps=args.steps
+        ):
+            glb = shape(prepared, shape_output, cache, args.steps, args.seed)
+        result = {"ok": True, "input": str(prepared), "shape": str(glb)}
+        if not args.shape_only:
+            texture_output = args.output_dir / "textured"
+            with reporter.stage(
+                "texture",
+                input=str(prepared),
+                mesh=str(glb),
+                output=str(texture_output),
+            ):
+                result["texture"] = str(texture(glb, prepared, texture_output, cache))
+        return result, 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -937,35 +1146,63 @@ def main(argv: list[str] | None = None) -> int:
     except CliError as error:
         return emit_error(error)
 
+    if args.command == "help":
+        parser.print_help()
+        return 0
+
+    reporter = ProgressReporter(args.command, sys.stderr)
+    reporter.run_started()
     try:
-        if args.command == "help":
-            parser.print_help()
-            return 0
-
         cache = cache_root(args.cache_dir)
-        components = validate_command(args)
-        if args.command == "doctor":
-            report, code = doctor_report(cache, args.output_dir)
-            return emit(report, code)
+        try:
+            components = validate_command(args)
+        except CliError as error:
+            reporter.run_failed(error)
+            return emit_error(error)
 
-        # Validation completes before this context creates the output directory
-        # or runtime log. Invalid requests therefore cannot mutate output state.
-        if args.command == "generate":
-            with generate_runtime_log(args):
-                return run_command(args, cache, components)
-        return run_command(args, cache, components)
+        with command_output(args, reporter) as diagnostics:
+            try:
+                if args.command == "doctor":
+                    payload, code = doctor_report(cache, args.output_dir)
+                else:
+                    payload, code = run_command(args, cache, components, reporter)
+            except CliError as error:
+                reporter.run_failed(error)
+                payload, code = error_result(error), error.exit_code
+            except (ImportError, ModuleNotFoundError) as error:
+                failure = CliError("dependency_failure", str(error), 5)
+                reporter.run_failed(failure)
+                payload, code = error_result(failure), failure.exit_code
+            except Exception as error:
+                traceback.print_exc(file=diagnostics)
+                failure = CliError(
+                    "generation_failure",
+                    str(error),
+                    1,
+                    {"exception": type(error).__name__},
+                )
+                reporter.run_failed(failure)
+                payload, code = error_result(failure), failure.exit_code
+            else:
+                reporter.run_completed()
+
+        return emit(payload, code)
     except CliError as error:
+        reporter.run_failed(error)
         return emit_error(error)
     except (ImportError, ModuleNotFoundError) as error:
-        return emit_error(CliError("dependency_failure", str(error), 5))
+        failure = CliError("dependency_failure", str(error), 5)
+        reporter.run_failed(failure)
+        return emit_error(failure)
     except Exception as error:
-        if args.command == "generate":
-            args.output_dir.mkdir(parents=True, exist_ok=True)
-            with (args.output_dir / "run.log").open("a", encoding="utf-8") as log:
-                traceback.print_exc(file=StderrTee(sys.stderr, log))
-        else:
-            traceback.print_exc(file=sys.stderr)
-        return emit_error(CliError("generation_failure", str(error), 1, {"exception": type(error).__name__}))
+        failure = CliError(
+            "generation_failure",
+            str(error),
+            1,
+            {"exception": type(error).__name__},
+        )
+        reporter.run_failed(failure)
+        return emit_error(failure)
 
 
 if __name__ == "__main__":

@@ -213,7 +213,9 @@ def test_configure_runtime_uses_the_selected_cache(monkeypatch, tmp_path: Path):
     assert os.environ["U2NET_HOME"] == str(tmp_path / "rembg")
 
 
-def test_pull_models_preloads_rembg_into_the_selected_cache(monkeypatch, tmp_path: Path):
+def test_pull_models_preloads_rembg_into_the_selected_cache(
+    monkeypatch, tmp_path: Path
+):
     loaded = []
 
     class FakeBackgroundRemover:
@@ -221,8 +223,16 @@ def test_pull_models_preloads_rembg_into_the_selected_cache(monkeypatch, tmp_pat
             loaded.append(os.environ["U2NET_HOME"])
 
     monkeypatch.setattr(cli, "legacy_paths", lambda: None)
-    monkeypatch.setitem(sys.modules, "huggingface_hub", types.SimpleNamespace(snapshot_download=lambda **kwargs: None))
-    monkeypatch.setitem(sys.modules, "hy3dshape.rembg", types.SimpleNamespace(BackgroundRemover=FakeBackgroundRemover))
+    monkeypatch.setitem(
+        sys.modules,
+        "huggingface_hub",
+        types.SimpleNamespace(snapshot_download=lambda **kwargs: None),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "hy3dshape.rembg",
+        types.SimpleNamespace(BackgroundRemover=FakeBackgroundRemover),
+    )
     monkeypatch.setenv("U2NET_HOME", str(tmp_path / "rembg"))
 
     assert cli.pull_models(tmp_path, {"prepare"}) == ["prepare"]
@@ -233,7 +243,19 @@ def test_prepare_requires_the_cached_background_remover(tmp_path: Path):
     source = tmp_path / "input.png"
     Image.new("RGB", (1, 1), "white").save(source)
 
-    assert cli.main(["--cache-dir", str(tmp_path), "prepare", str(source), "--output", str(tmp_path / "output.png")]) == 3
+    assert (
+        cli.main(
+            [
+                "--cache-dir",
+                str(tmp_path),
+                "prepare",
+                str(source),
+                "--output",
+                str(tmp_path / "output.png"),
+            ]
+        )
+        == 3
+    )
 
 
 def test_shape_loads_weights_from_the_selected_cache(monkeypatch, tmp_path: Path):
@@ -259,16 +281,27 @@ def test_shape_loads_weights_from_the_selected_cache(monkeypatch, tmp_path: Path
             return FakePipeline()
 
     fake_torch = types.SimpleNamespace(
-        cuda=types.SimpleNamespace(get_device_properties=lambda _: types.SimpleNamespace(total_memory=32 * 1024**3)),
-        Generator=lambda device: types.SimpleNamespace(manual_seed=lambda seed: (device, seed)),
+        cuda=types.SimpleNamespace(
+            get_device_properties=lambda _: types.SimpleNamespace(
+                total_memory=32 * 1024**3
+            )
+        ),
+        Generator=lambda device: types.SimpleNamespace(
+            manual_seed=lambda seed: (device, seed)
+        ),
     )
     monkeypatch.setattr(cli, "legacy_paths", lambda: None)
     monkeypatch.setitem(sys.modules, "torch", fake_torch)
-    monkeypatch.setitem(sys.modules, "hy3dshape.pipelines", types.SimpleNamespace(
-        Hunyuan3DDiTFlowMatchingPipeline=FakePipelineClass
-    ))
+    monkeypatch.setitem(
+        sys.modules,
+        "hy3dshape.pipelines",
+        types.SimpleNamespace(Hunyuan3DDiTFlowMatchingPipeline=FakePipelineClass),
+    )
 
-    assert cli.shape(tmp_path / "input.png", tmp_path / "shape.glb", tmp_path, 50, None) == tmp_path / "shape.glb"
+    assert (
+        cli.shape(tmp_path / "input.png", tmp_path / "shape.glb", tmp_path, 50, None)
+        == tmp_path / "shape.glb"
+    )
     assert loaded_paths == [str(tmp_path / "models/tencent/Hunyuan3D-2.1")]
 
 
@@ -287,17 +320,35 @@ def test_texture_config_uses_only_the_selected_cache(monkeypatch, tmp_path: Path
             captured["call"] = kwargs
 
     monkeypatch.setattr(cli, "legacy_paths", lambda: None)
-    monkeypatch.setitem(sys.modules, "torchvision_fix", types.SimpleNamespace(apply_fix=lambda: None))
-    monkeypatch.setitem(sys.modules, "textureGenPipeline", types.SimpleNamespace(
-        Hunyuan3DPaintConfig=FakeConfig,
-        Hunyuan3DPaintPipeline=FakePipeline,
-    ))
+    monkeypatch.setitem(
+        sys.modules, "torchvision_fix", types.SimpleNamespace(apply_fix=lambda: None)
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "textureGenPipeline",
+        types.SimpleNamespace(
+            Hunyuan3DPaintConfig=FakeConfig,
+            Hunyuan3DPaintPipeline=FakePipeline,
+        ),
+    )
 
-    assert cli.texture(tmp_path / "shape.glb", tmp_path / "input.png", tmp_path / "textured.glb", tmp_path) == tmp_path / "textured.obj"
+    assert (
+        cli.texture(
+            tmp_path / "shape.glb",
+            tmp_path / "input.png",
+            tmp_path / "textured.glb",
+            tmp_path,
+        )
+        == tmp_path / "textured.obj"
+    )
     config = captured["config"]
-    assert config.multiview_pretrained_path == str(tmp_path / "models/tencent/Hunyuan3D-2.1")
+    assert config.multiview_pretrained_path == str(
+        tmp_path / "models/tencent/Hunyuan3D-2.1"
+    )
     assert config.dino_ckpt_path == str(tmp_path / "models/facebook/dinov2-giant")
-    assert config.realesrgan_ckpt_path == str(tmp_path / "realesrgan/RealESRGAN_x4plus.pth")
+    assert config.realesrgan_ckpt_path == str(
+        tmp_path / "realesrgan/RealESRGAN_x4plus.pth"
+    )
 
 
 def test_texture_uses_repository_absolute_config_path(tmp_path: Path, monkeypatch):
@@ -315,19 +366,32 @@ def test_texture_uses_repository_absolute_config_path(tmp_path: Path, monkeypatc
             pass
 
     monkeypatch.setattr(cli, "legacy_paths", lambda: None)
-    monkeypatch.setitem(sys.modules, "torchvision_fix", types.SimpleNamespace(apply_fix=lambda: None))
+    monkeypatch.setitem(
+        sys.modules, "torchvision_fix", types.SimpleNamespace(apply_fix=lambda: None)
+    )
     monkeypatch.setitem(
         sys.modules,
         "textureGenPipeline",
-        types.SimpleNamespace(Hunyuan3DPaintConfig=FakeConfig, Hunyuan3DPaintPipeline=FakePipeline),
+        types.SimpleNamespace(
+            Hunyuan3DPaintConfig=FakeConfig, Hunyuan3DPaintPipeline=FakePipeline
+        ),
     )
 
-    cli.texture(tmp_path / "shape.glb", tmp_path / "input.png", tmp_path / "textured", tmp_path / "cache")
+    cli.texture(
+        tmp_path / "shape.glb",
+        tmp_path / "input.png",
+        tmp_path / "textured",
+        tmp_path / "cache",
+    )
 
-    assert captured["config"].multiview_cfg_path == str(cli.ROOT / "hy3dpaint/cfgs/hunyuan-paint-pbr.yaml")
+    assert captured["config"].multiview_cfg_path == str(
+        cli.ROOT / "hy3dpaint/cfgs/hunyuan-paint-pbr.yaml"
+    )
 
 
-def test_multiview_pipeline_trusts_checked_in_custom_pipeline(tmp_path: Path, monkeypatch):
+def test_multiview_pipeline_trusts_checked_in_custom_pipeline(
+    tmp_path: Path, monkeypatch
+):
     cli.legacy_paths()
     from utils import multiview_utils
 
@@ -346,14 +410,24 @@ def test_multiview_pipeline_trusts_checked_in_custom_pipeline(tmp_path: Path, mo
         def to(self, _device):
             return self
 
-    monkeypatch.setattr(multiview_utils.huggingface_hub, "snapshot_download", lambda **_kwargs: str(tmp_path))
-    monkeypatch.setattr(multiview_utils.UniPCMultistepScheduler, "from_config", lambda _config, **_kwargs: object())
+    monkeypatch.setattr(
+        multiview_utils.huggingface_hub,
+        "snapshot_download",
+        lambda **_kwargs: str(tmp_path),
+    )
+    monkeypatch.setattr(
+        multiview_utils.UniPCMultistepScheduler,
+        "from_config",
+        lambda _config, **_kwargs: object(),
+    )
 
     def fake_from_pretrained(*_args, **kwargs):
         captured.update(kwargs)
         return FakePipeline()
 
-    monkeypatch.setattr(multiview_utils.DiffusionPipeline, "from_pretrained", fake_from_pretrained)
+    monkeypatch.setattr(
+        multiview_utils.DiffusionPipeline, "from_pretrained", fake_from_pretrained
+    )
     config = types.SimpleNamespace(
         device="cpu",
         multiview_cfg_path=str(cli.ROOT / "hy3dpaint/cfgs/hunyuan-paint-pbr.yaml"),
@@ -396,7 +470,9 @@ def test_installed_cli_is_available_from_another_directory(tmp_path: Path):
     assert doctor_payload["cache"] == str(cli.ROOT / ".cache/hunyuan3d")
 
 
-def test_persistent_command_installer_runs_the_cli_from_another_directory(tmp_path: Path):
+def test_persistent_command_installer_runs_the_cli_from_another_directory(
+    tmp_path: Path,
+):
     command_dir = tmp_path / "bin"
     shell_rc = tmp_path / "bashrc"
     env = {
@@ -404,7 +480,9 @@ def test_persistent_command_installer_runs_the_cli_from_another_directory(tmp_pa
         "HUNYUAN3D_COMMAND_DIR": str(command_dir),
         "HUNYUAN3D_SHELL_RC": str(shell_rc),
     }
-    subprocess.run([Path(__file__).parents[1] / "install-command.sh"], env=env, check=True)
+    subprocess.run(
+        [Path(__file__).parents[1] / "install-command.sh"], env=env, check=True
+    )
 
     assert (command_dir / "hunyuan3d").is_file()
     assert f'export PATH="{command_dir}:$PATH"' in shell_rc.read_text()
@@ -423,11 +501,24 @@ def test_persistent_command_installer_runs_the_cli_from_another_directory(tmp_pa
 
 def run_cli(*args: str) -> subprocess.CompletedProcess[str]:
     executable = Path(sys.executable).with_name("hunyuan3d")
-    return subprocess.run([executable, *args], text=True, capture_output=True, check=False)
+    return subprocess.run(
+        [executable, *args], text=True, capture_output=True, check=False
+    )
+
+
+def json_events(result: subprocess.CompletedProcess[str]) -> list[dict]:
+    lines = [line for line in result.stderr.splitlines() if line.strip()]
+    events = [json.loads(line) for line in lines]
+    assert events
+    assert all(event["schema_version"] == 1 for event in events)
+    assert len({event["run_id"] for event in events}) == 1
+    return events
 
 
 def json_result(result: subprocess.CompletedProcess[str]) -> dict:
-    assert result.stderr == ""
+    if result.stderr.strip():
+        json_events(result)
+    assert len(result.stdout.splitlines()) == 1
     return json.loads(result.stdout)
 
 
@@ -436,7 +527,15 @@ def json_result(result: subprocess.CompletedProcess[str]) -> dict:
     [
         ("not-a-command",),
         ("shape", "--image", "input.png"),
-        ("shape", "--image", "input.png", "--output", "output.glb", "--steps", "not-a-number"),
+        (
+            "shape",
+            "--image",
+            "input.png",
+            "--output",
+            "output.glb",
+            "--steps",
+            "not-a-number",
+        ),
     ],
 )
 def test_parse_failures_are_versioned_json_errors(arguments: tuple[str, ...]):
@@ -449,7 +548,12 @@ def test_parse_failures_are_versioned_json_errors(arguments: tuple[str, ...]):
 
 
 def test_missing_input_is_a_versioned_json_error(tmp_path: Path):
-    result = run_cli("prepare", str(tmp_path / "missing.png"), "--output", str(tmp_path / "output.png"))
+    result = run_cli(
+        "prepare",
+        str(tmp_path / "missing.png"),
+        "--output",
+        str(tmp_path / "output.png"),
+    )
     assert result.returncode == 3
     payload = json_result(result)
     assert payload["schema_version"] == 1
@@ -478,12 +582,16 @@ def test_invalid_model_component_selections_fail_without_pulling(components: str
     assert payload["error"]["code"] == "invalid_arguments"
 
 
-def test_unreadable_image_fails_before_runtime_setup(tmp_path: Path, monkeypatch, capsys):
+def test_unreadable_image_fails_before_runtime_setup(
+    tmp_path: Path, monkeypatch, capsys
+):
     source = tmp_path / "input.png"
     source.write_text("not an image")
     output = tmp_path / "output.png"
 
-    monkeypatch.setattr(cli, "configure_runtime", lambda _cache: pytest.fail("runtime was configured"))
+    monkeypatch.setattr(
+        cli, "configure_runtime", lambda _cache: pytest.fail("runtime was configured")
+    )
 
     assert cli.main(["prepare", str(source), "--output", str(output)]) == 3
     payload = json.loads(capsys.readouterr().out)
@@ -497,32 +605,56 @@ def test_invalid_steps_fail_before_runtime_setup(tmp_path: Path, monkeypatch, ca
     Image.new("RGB", (1, 1), "white").save(source)
     output = tmp_path / "shape.glb"
 
-    monkeypatch.setattr(cli, "configure_runtime", lambda _cache: pytest.fail("runtime was configured"))
+    monkeypatch.setattr(
+        cli, "configure_runtime", lambda _cache: pytest.fail("runtime was configured")
+    )
 
-    assert cli.main(["shape", "--image", str(source), "--output", str(output), "--steps", "0"]) == 2
+    assert (
+        cli.main(
+            ["shape", "--image", str(source), "--output", str(output), "--steps", "0"]
+        )
+        == 2
+    )
     payload = json.loads(capsys.readouterr().out)
 
     assert payload["error"]["code"] == "invalid_arguments"
     assert not output.exists()
 
 
-def test_unsupported_mesh_format_fails_before_runtime_setup(tmp_path: Path, monkeypatch, capsys):
+def test_unsupported_mesh_format_fails_before_runtime_setup(
+    tmp_path: Path, monkeypatch, capsys
+):
     mesh = tmp_path / "mesh.txt"
     mesh.write_text("not a mesh")
     image = tmp_path / "input.png"
     Image.new("RGB", (1, 1), "white").save(image)
 
-    monkeypatch.setattr(cli, "configure_runtime", lambda _cache: pytest.fail("runtime was configured"))
+    monkeypatch.setattr(
+        cli, "configure_runtime", lambda _cache: pytest.fail("runtime was configured")
+    )
 
-    assert cli.main([
-        "texture", "--mesh", str(mesh), "--image", str(image), "--output", str(tmp_path / "textured")
-    ]) == 3
+    assert (
+        cli.main(
+            [
+                "texture",
+                "--mesh",
+                str(mesh),
+                "--image",
+                str(image),
+                "--output",
+                str(tmp_path / "textured"),
+            ]
+        )
+        == 3
+    )
     payload = json.loads(capsys.readouterr().out)
 
     assert payload["error"]["code"] == "invalid_input"
 
 
-def test_generate_rejects_partial_output_plan_before_runtime_setup(tmp_path: Path, monkeypatch, capsys):
+def test_generate_rejects_partial_output_plan_before_runtime_setup(
+    tmp_path: Path, monkeypatch, capsys
+):
     source = tmp_path / "input.png"
     Image.new("RGB", (1, 1), "white").save(source)
     output_dir = tmp_path / "output"
@@ -530,9 +662,23 @@ def test_generate_rejects_partial_output_plan_before_runtime_setup(tmp_path: Pat
     existing = output_dir / "shape.glb"
     existing.write_text("existing")
 
-    monkeypatch.setattr(cli, "configure_runtime", lambda _cache: pytest.fail("runtime was configured"))
+    monkeypatch.setattr(
+        cli, "configure_runtime", lambda _cache: pytest.fail("runtime was configured")
+    )
 
-    assert cli.main(["generate", "--image", str(source), "--output-dir", str(output_dir), "--shape-only"]) == 3
+    assert (
+        cli.main(
+            [
+                "generate",
+                "--image",
+                str(source),
+                "--output-dir",
+                str(output_dir),
+                "--shape-only",
+            ]
+        )
+        == 3
+    )
     payload = json.loads(capsys.readouterr().out)
 
     assert payload["error"]["code"] == "output_conflict"
@@ -541,7 +687,9 @@ def test_generate_rejects_partial_output_plan_before_runtime_setup(tmp_path: Pat
 
 
 def test_generate_write_plan_includes_texture_artifacts(tmp_path: Path):
-    planned = {path.name for path in cli.generate_write_plan(tmp_path / "output", False)}
+    planned = {
+        path.name for path in cli.generate_write_plan(tmp_path / "output", False)
+    }
 
     assert planned == {
         "input.rgba.png",
@@ -556,7 +704,9 @@ def test_generate_write_plan_includes_texture_artifacts(tmp_path: Path):
     }
 
 
-def test_overwrite_allows_an_existing_direct_output(tmp_path: Path, monkeypatch, capsys):
+def test_overwrite_allows_an_existing_direct_output(
+    tmp_path: Path, monkeypatch, capsys
+):
     source = tmp_path / "input.png"
     Image.new("RGB", (1, 1), "white").save(source)
     output = tmp_path / "output.png"
@@ -571,9 +721,9 @@ def test_overwrite_allows_an_existing_direct_output(tmp_path: Path, monkeypatch,
 
     monkeypatch.setattr(cli, "prepare_image", fake_prepare)
 
-    assert cli.main([
-        "prepare", str(source), "--output", str(output), "--overwrite"
-    ]) == 0
+    assert (
+        cli.main(["prepare", str(source), "--output", str(output), "--overwrite"]) == 0
+    )
     payload = json.loads(capsys.readouterr().out)
 
     assert payload["ok"] is True
@@ -586,9 +736,9 @@ def test_overwrite_does_not_treat_an_output_directory_as_a_file(tmp_path: Path, 
     output = tmp_path / "output.png"
     output.mkdir()
 
-    assert cli.main([
-        "prepare", str(source), "--output", str(output), "--overwrite"
-    ]) == 3
+    assert (
+        cli.main(["prepare", str(source), "--output", str(output), "--overwrite"]) == 3
+    )
     payload = json.loads(capsys.readouterr().out)
 
     assert payload["error"]["code"] == "invalid_output"
@@ -600,9 +750,19 @@ def test_output_parent_must_be_a_directory(tmp_path: Path, capsys):
     output_parent = tmp_path / "not-a-directory"
     output_parent.write_text("file")
 
-    assert cli.main([
-        "generate", "--image", str(source), "--output-dir", str(output_parent), "--shape-only"
-    ]) == 3
+    assert (
+        cli.main(
+            [
+                "generate",
+                "--image",
+                str(source),
+                "--output-dir",
+                str(output_parent),
+                "--shape-only",
+            ]
+        )
+        == 3
+    )
     payload = json.loads(capsys.readouterr().out)
 
     assert payload["error"]["code"] == "invalid_output"
@@ -616,7 +776,141 @@ def test_success_result_is_versioned_json():
     assert payload["ok"] is True
 
 
-def test_generate_writes_runtime_log_and_keeps_stdout_json(tmp_path: Path, monkeypatch, capsys):
+def test_model_pull_reports_component_progress(tmp_path: Path, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "configure_runtime", lambda cache: None)
+
+    def fake_pull(cache: Path, components: set[str], reporter: cli.ProgressReporter):
+        reporter.progress("model_pull", 1, len(components), component="shape")
+        reporter.progress("model_pull", 2, len(components), component="prepare")
+        return ["shape", "prepare"]
+
+    monkeypatch.setattr(cli, "pull_models", fake_pull)
+
+    assert (
+        cli.main(
+            [
+                "--cache-dir",
+                str(tmp_path / "cache"),
+                "models",
+                "pull",
+                "--components",
+                "shape,prepare",
+            ]
+        )
+        == 0
+    )
+    captured = capsys.readouterr()
+    events = json_events(types.SimpleNamespace(stderr=captured.err))
+    progress = [event for event in events if event["event"] == "progress"]
+    assert [(event["current"], event["total"]) for event in progress] == [
+        (0, 2),
+        (1, 2),
+        (2, 2),
+        (2, 2),
+    ]
+    assert json.loads(captured.out)["pulled"] == ["shape", "prepare"]
+
+
+def test_generate_emits_ordered_jsonl_events_for_each_stage(
+    tmp_path: Path, monkeypatch, capsys
+):
+    source = tmp_path / "input.png"
+    Image.new("RGB", (1, 1), "white").save(source)
+    output_dir = tmp_path / "output"
+
+    monkeypatch.setattr(cli, "configure_runtime", lambda cache: None)
+    monkeypatch.setattr(cli, "require_cuda", lambda: None)
+    monkeypatch.setattr(cli, "require_model_assets", lambda cache, components: None)
+
+    def fake_prepare(image: Path, output: Path) -> Path:
+        output.touch()
+        return output
+
+    def fake_shape(
+        image: Path, output: Path, cache: Path, steps: int, seed: int | None
+    ) -> Path:
+        output.touch()
+        return output
+
+    def fake_texture(mesh: Path, image: Path, output: Path, cache: Path) -> Path:
+        return output.with_suffix(".obj")
+
+    monkeypatch.setattr(cli, "prepare_image", fake_prepare)
+    monkeypatch.setattr(cli, "shape", fake_shape)
+    monkeypatch.setattr(cli, "texture", fake_texture)
+
+    assert (
+        cli.main(["generate", "--image", str(source), "--output-dir", str(output_dir)])
+        == 0
+    )
+    captured = capsys.readouterr()
+    events = json_events(types.SimpleNamespace(stderr=captured.err))
+
+    started = [event["stage"] for event in events if event["event"] == "stage_started"]
+    completed = [
+        event["stage"] for event in events if event["event"] == "stage_completed"
+    ]
+    assert started == ["generate", "prepare", "shape", "texture"]
+    assert completed == ["prepare", "shape", "texture", "generate"]
+    assert [event["event"] for event in events][-1] == "run_completed"
+    assert {event["stage"] for event in events if event["event"] == "progress"} == {
+        "generate",
+        "prepare",
+        "shape",
+        "texture",
+    }
+    assert len(captured.out.splitlines()) == 1
+    assert json.loads(captured.out)["ok"] is True
+
+
+def test_failed_stage_event_is_bounded_and_redacted(
+    tmp_path: Path, monkeypatch, capsys
+):
+    source = tmp_path / "input.png"
+    Image.new("RGB", (1, 1), "white").save(source)
+    output_dir = tmp_path / "output"
+
+    monkeypatch.setattr(cli, "configure_runtime", lambda cache: None)
+    monkeypatch.setattr(cli, "require_cuda", lambda: None)
+    monkeypatch.setattr(cli, "require_model_assets", lambda cache, components: None)
+    monkeypatch.setattr(cli, "prepare_image", lambda image, output: output)
+
+    def fail_shape(*args, **kwargs):
+        raise RuntimeError("token=super-secret " + "x" * 1000)
+
+    monkeypatch.setattr(cli, "shape", fail_shape)
+
+    assert (
+        cli.main(
+            [
+                "generate",
+                "--image",
+                str(source),
+                "--output-dir",
+                str(output_dir),
+                "--shape-only",
+            ]
+        )
+        == 1
+    )
+    captured = capsys.readouterr()
+    events = json_events(types.SimpleNamespace(stderr=captured.err))
+    failures = [
+        event
+        for event in events
+        if event["event"] == "stage_failed" and event["stage"] == "shape"
+    ]
+    assert failures
+    message = failures[0]["error"]["message"]
+    assert "super-secret" not in message
+    assert len(message) <= cli.EVENT_MESSAGE_LIMIT
+    assert "Traceback" not in captured.err
+    assert json.loads(captured.out)["error"]["code"] == "generation_failure"
+
+
+def test_generate_writes_runtime_log_and_keeps_stdout_json(
+    tmp_path: Path, monkeypatch, capsys
+):
     source = tmp_path / "input.png"
     Image.new("RGB", (1, 1), "white").save(source)
     output_dir = tmp_path / "output"
@@ -630,7 +924,9 @@ def test_generate_writes_runtime_log_and_keeps_stdout_json(tmp_path: Path, monke
         output.touch()
         return output
 
-    def fake_shape(image: Path, output: Path, cache: Path, steps: int, seed: int | None) -> Path:
+    def fake_shape(
+        image: Path, output: Path, cache: Path, steps: int, seed: int | None
+    ) -> Path:
         print("shape generation detail", file=sys.stderr)
         output.touch()
         return output
@@ -638,7 +934,19 @@ def test_generate_writes_runtime_log_and_keeps_stdout_json(tmp_path: Path, monke
     monkeypatch.setattr(cli, "prepare_image", fake_prepare)
     monkeypatch.setattr(cli, "shape", fake_shape)
 
-    assert cli.main(["generate", "--image", str(source), "--output-dir", str(output_dir), "--shape-only"]) == 0
+    assert (
+        cli.main(
+            [
+                "generate",
+                "--image",
+                str(source),
+                "--output-dir",
+                str(output_dir),
+                "--shape-only",
+            ]
+        )
+        == 0
+    )
     captured = capsys.readouterr()
 
     assert json.loads(captured.out)["ok"] is True
@@ -664,7 +972,19 @@ def test_generate_runtime_log_retains_traceback(tmp_path: Path, monkeypatch, cap
 
     monkeypatch.setattr(cli, "shape", fail_shape)
 
-    assert cli.main(["generate", "--image", str(source), "--output-dir", str(output_dir), "--shape-only"]) == 1
+    assert (
+        cli.main(
+            [
+                "generate",
+                "--image",
+                str(source),
+                "--output-dir",
+                str(output_dir),
+                "--shape-only",
+            ]
+        )
+        == 1
+    )
     captured = capsys.readouterr()
 
     assert json.loads(captured.out)["error"]["code"] == "generation_failure"
