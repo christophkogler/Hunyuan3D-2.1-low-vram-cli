@@ -11,6 +11,7 @@ import sys
 import traceback
 import urllib.request
 from pathlib import Path
+from typing import TextIO
 
 ROOT = Path(__file__).resolve().parents[2]
 MODEL_REVISIONS = {
@@ -53,6 +54,38 @@ def emit_error(error: CliError) -> int:
     if error.details is not None:
         payload["details"] = error.details
     return emit({"ok": False, "error": payload}, error.exit_code)
+
+
+class StderrTee:
+    """Write diagnostic output to the terminal and a generate runtime log."""
+
+    def __init__(self, *streams: TextIO):
+        self.streams = streams
+
+    def write(self, value: str) -> int:
+        for stream in self.streams:
+            stream.write(value)
+        return len(value)
+
+    def flush(self) -> None:
+        for stream in self.streams:
+            stream.flush()
+
+    def __getattr__(self, name: str):
+        return getattr(self.streams[0], name)
+
+
+@contextlib.contextmanager
+def generate_runtime_log(args: argparse.Namespace):
+    """Mirror generate diagnostics to a per-invocation log once its directory is known."""
+    if args.command != "generate":
+        yield
+        return
+
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    with (args.output_dir / "run.log").open("w", encoding="utf-8") as log:
+        with contextlib.redirect_stderr(StderrTee(sys.stderr, log)):
+            yield
 
 
 def cache_root(value: str | None) -> Path:
@@ -216,60 +249,72 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     try:
         args = parser.parse_args(argv)
-        if args.command == "help":
-            parser.print_help()
-            return 0
-        cache = cache_root(args.cache_dir)
-        if args.command == "prepare":
-            require_file(args.image, "image")
-        elif args.command == "shape":
-            require_file(args.image, "--image")
-        elif args.command == "texture":
-            require_file(args.mesh, "--mesh")
-            require_file(args.image, "--image")
-        elif args.command == "generate":
-            require_file(args.image, "--image")
-        if args.command == "models":
-            components = set(args.components.split(","))
-            invalid = sorted(component for component in components if component not in {"shape", "texture"})
-            if invalid:
-                raise CliError("invalid_arguments", "Unknown model component.", 2, {"invalid": invalid})
-        configure_runtime(cache)
-        if args.command == "doctor":
-            import torch
-            if not torch.cuda.is_available():
-                raise CliError("unsupported_runtime", "CUDA is not available.", 4)
-            return emit({"ok": True, "cuda": True, "nvcc": shutil.which("nvcc"), "cache": str(cache), "torch": torch.__version__})
-        if args.command == "models":
-            if args.action == "pull":
-                return emit({"ok": True, "pulled": pull_models(cache, components), "cache": str(cache)})
-            return emit({"ok": True, "cache": str(cache), "models": model_status(cache)})
-        if args.command == "prepare":
-            return emit({"ok": True, "image": str(prepare_image(args.image, args.output))})
-        if args.command == "shape":
+    except CliError as error:
+        return emit_error(error)
+
+    try:
+        with generate_runtime_log(args):
+            if args.command == "help":
+                parser.print_help()
+                return 0
+            cache = cache_root(args.cache_dir)
+            if args.command == "prepare":
+                require_file(args.image, "image")
+            elif args.command == "shape":
+                require_file(args.image, "--image")
+            elif args.command == "texture":
+                require_file(args.mesh, "--mesh")
+                require_file(args.image, "--image")
+            elif args.command == "generate":
+                require_file(args.image, "--image")
+            if args.command == "models":
+                components = set(args.components.split(","))
+                invalid = sorted(component for component in components if component not in {"shape", "texture"})
+                if invalid:
+                    raise CliError("invalid_arguments", "Unknown model component.", 2, {"invalid": invalid})
+            configure_runtime(cache)
+            if args.command == "doctor":
+                import torch
+                if not torch.cuda.is_available():
+                    raise CliError("unsupported_runtime", "CUDA is not available.", 4)
+                return emit({"ok": True, "cuda": True, "nvcc": shutil.which("nvcc"), "cache": str(cache), "torch": torch.__version__})
+            if args.command == "models":
+                if args.action == "pull":
+                    return emit({"ok": True, "pulled": pull_models(cache, components), "cache": str(cache)})
+                return emit({"ok": True, "cache": str(cache), "models": model_status(cache)})
+            if args.command == "prepare":
+                return emit({"ok": True, "image": str(prepare_image(args.image, args.output))})
+            if args.command == "shape":
+                require_cuda()
+                require_model_assets(cache, {"shape"})
+                return emit({"ok": True, "shape": str(shape(args.image, args.output, cache, args.steps, args.seed))})
+            if args.command == "texture":
+                require_cuda()
+                require_model_assets(cache, {"texture", "dino", "realesrgan"})
+                return emit({"ok": True, "texture": str(texture(args.mesh, args.image, args.output, cache))})
             require_cuda()
-            require_model_assets(cache, {"shape"})
-            return emit({"ok": True, "shape": str(shape(args.image, args.output, cache, args.steps, args.seed))})
-        if args.command == "texture":
-            require_cuda()
-            require_model_assets(cache, {"texture", "dino", "realesrgan"})
-            return emit({"ok": True, "texture": str(texture(args.mesh, args.image, args.output, cache))})
-        require_cuda()
-        required_models = {"shape"} if args.shape_only else {"shape", "texture", "dino", "realesrgan"}
-        require_model_assets(cache, required_models)
-        prepared = args.output_dir / "input.rgba.png"
-        prepare_image(args.image, prepared)
-        glb = shape(prepared, args.output_dir / "shape.glb", cache, args.steps, args.seed)
-        result = {"ok": True, "input": str(prepared), "shape": str(glb)}
-        if not args.shape_only:
-            result["texture"] = str(texture(glb, prepared, args.output_dir / "textured", cache))
-        return emit(result)
+            required_models = {"shape"} if args.shape_only else {"shape", "texture", "dino", "realesrgan"}
+            require_model_assets(cache, required_models)
+            prepared = args.output_dir / "input.rgba.png"
+            print("Preparing image...", file=sys.stderr, flush=True)
+            prepare_image(args.image, prepared)
+            print("Generating shape...", file=sys.stderr, flush=True)
+            glb = shape(prepared, args.output_dir / "shape.glb", cache, args.steps, args.seed)
+            result = {"ok": True, "input": str(prepared), "shape": str(glb)}
+            if not args.shape_only:
+                print("Generating texture...", file=sys.stderr, flush=True)
+                result["texture"] = str(texture(glb, prepared, args.output_dir / "textured", cache))
+            return emit(result)
     except CliError as error:
         return emit_error(error)
     except (ImportError, ModuleNotFoundError) as error:
         return emit_error(CliError("dependency_failure", str(error), 5))
     except Exception as error:
-        traceback.print_exc(file=sys.stderr)
+        if args.command == "generate":
+            with (args.output_dir / "run.log").open("a", encoding="utf-8") as log:
+                traceback.print_exc(file=StderrTee(sys.stderr, log))
+        else:
+            traceback.print_exc(file=sys.stderr)
         return emit_error(CliError("generation_failure", str(error), 1, {"exception": type(error).__name__}))
 
 

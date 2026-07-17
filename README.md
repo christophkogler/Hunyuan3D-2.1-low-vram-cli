@@ -33,7 +33,7 @@ hunyuan3d generate --image ./flower.png --output-dir ./output --shape-only
 
 ## CLI contract
 
-Every normal command invocation emits exactly one JSON object on stdout. Progress and tracebacks are written to stderr; failures exit non-zero. Every result includes `schema_version: 1`. Failure payloads use `error.code`, `error.message`, and, when useful, `error.details`. Stable error codes include `invalid_arguments`, `missing_input`, `missing_model_assets`, `unsupported_runtime`, `dependency_failure`, and `generation_failure`.
+Every normal command invocation emits exactly one JSON object on stdout. Progress and tracebacks are written to stderr; `generate` also persists them to `run.log` in its output directory. Failures exit non-zero. Every result includes `schema_version: 1`. Failure payloads use `error.code`, `error.message`, and, when useful, `error.details`. Stable error codes include `invalid_arguments`, `missing_input`, `missing_model_assets`, `unsupported_runtime`, `dependency_failure`, and `generation_failure`.
 
 ```bash
 # Verify GPU visibility, torch build, CUDA compiler, and cache location.
@@ -76,6 +76,7 @@ The previous Gradio, API, notebook, training, Docker-demo, and sample-data surfa
 - `input.rgba.png` — prepared reference image.
 - `shape.glb` — untextured shape checkpoint.
 - `textured.obj`, `.mtl`, and PBR texture maps — final textured asset.
+- `run.log` — progress, warnings, and any failure traceback from this `generate` invocation.
 
 This structure lets an agent retry only the failed stage without rerunning shape generation.
 
