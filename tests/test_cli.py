@@ -169,6 +169,45 @@ def test_texture_uses_repository_absolute_config_path(tmp_path: Path, monkeypatc
     assert captured["config"].multiview_cfg_path == str(cli.ROOT / "hy3dpaint/cfgs/hunyuan-paint-pbr.yaml")
 
 
+def test_multiview_pipeline_trusts_checked_in_custom_pipeline(tmp_path: Path, monkeypatch):
+    cli.legacy_paths()
+    from utils import multiview_utils
+
+    captured = {}
+
+    class FakePipeline:
+        scheduler = types.SimpleNamespace(config={})
+        unet = types.SimpleNamespace(use_dino=False)
+
+        def set_progress_bar_config(self, **_kwargs):
+            pass
+
+        def eval(self):
+            pass
+
+        def to(self, _device):
+            return self
+
+    monkeypatch.setattr(multiview_utils.huggingface_hub, "snapshot_download", lambda **_kwargs: str(tmp_path))
+    monkeypatch.setattr(multiview_utils.UniPCMultistepScheduler, "from_config", lambda _config, **_kwargs: object())
+
+    def fake_from_pretrained(*_args, **kwargs):
+        captured.update(kwargs)
+        return FakePipeline()
+
+    monkeypatch.setattr(multiview_utils.DiffusionPipeline, "from_pretrained", fake_from_pretrained)
+    config = types.SimpleNamespace(
+        device="cpu",
+        multiview_cfg_path=str(cli.ROOT / "hy3dpaint/cfgs/hunyuan-paint-pbr.yaml"),
+        multiview_pretrained_path="tencent/Hunyuan3D-2.1",
+        cpu_offload=False,
+    )
+
+    multiview_utils.multiviewDiffusionNet(config)
+
+    assert captured["trust_remote_code"] is True
+
+
 def test_installed_cli_is_available_from_another_directory(tmp_path: Path):
     script_dir = Path(sys.executable).parent
     assert (script_dir / "hunyuan3d").is_file()

@@ -46,8 +46,11 @@ class multiviewDiffusionNet:
         model_path = os.path.join(model_path, "hunyuan3d-paintpbr-v2-1")
         pipeline = DiffusionPipeline.from_pretrained(
             model_path,
-            custom_pipeline=custom_pipeline, 
-            torch_dtype=torch.float16
+            custom_pipeline=custom_pipeline,
+            torch_dtype=torch.float16,
+            # This is the repository's checked-in Hunyuan PBR pipeline, not
+            # code fetched from the model repository.
+            trust_remote_code=True,
         )
 
         pipeline.scheduler = UniPCMultistepScheduler.from_config(pipeline.scheduler.config, timestep_spacing="trailing")
