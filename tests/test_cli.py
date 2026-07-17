@@ -251,6 +251,63 @@ def test_success_result_is_versioned_json():
     assert payload["ok"] is True
 
 
+def test_generate_writes_runtime_log_and_keeps_stdout_json(tmp_path: Path, monkeypatch, capsys):
+    source = tmp_path / "input.png"
+    source.touch()
+    output_dir = tmp_path / "output"
+
+    monkeypatch.setattr(cli, "configure_runtime", lambda cache: None)
+    monkeypatch.setattr(cli, "require_cuda", lambda: None)
+    monkeypatch.setattr(cli, "require_model_assets", lambda cache, components: None)
+
+    def fake_prepare(image: Path, output: Path) -> Path:
+        print("image preparation detail", file=sys.stderr)
+        output.touch()
+        return output
+
+    def fake_shape(image: Path, output: Path, cache: Path, steps: int, seed: int | None) -> Path:
+        print("shape generation detail", file=sys.stderr)
+        output.touch()
+        return output
+
+    monkeypatch.setattr(cli, "prepare_image", fake_prepare)
+    monkeypatch.setattr(cli, "shape", fake_shape)
+
+    assert cli.main(["generate", "--image", str(source), "--output-dir", str(output_dir), "--shape-only"]) == 0
+    captured = capsys.readouterr()
+
+    assert json.loads(captured.out)["ok"] is True
+    log = (output_dir / "run.log").read_text()
+    assert "Preparing image..." in log
+    assert "image preparation detail" in log
+    assert "Generating shape..." in log
+    assert "shape generation detail" in log
+
+
+def test_generate_runtime_log_retains_traceback(tmp_path: Path, monkeypatch, capsys):
+    source = tmp_path / "input.png"
+    source.touch()
+    output_dir = tmp_path / "output"
+
+    monkeypatch.setattr(cli, "configure_runtime", lambda cache: None)
+    monkeypatch.setattr(cli, "require_cuda", lambda: None)
+    monkeypatch.setattr(cli, "require_model_assets", lambda cache, components: None)
+    monkeypatch.setattr(cli, "prepare_image", lambda image, output: output)
+
+    def fail_shape(*args, **kwargs):
+        raise RuntimeError("shape pipeline failed")
+
+    monkeypatch.setattr(cli, "shape", fail_shape)
+
+    assert cli.main(["generate", "--image", str(source), "--output-dir", str(output_dir), "--shape-only"]) == 1
+    captured = capsys.readouterr()
+
+    assert json.loads(captured.out)["error"]["code"] == "generation_failure"
+    log = (output_dir / "run.log").read_text()
+    assert "Traceback" in log
+    assert "RuntimeError: shape pipeline failed" in log
+
+
 def test_help_remains_available_as_an_explicit_human_path():
     result = run_cli("help")
     assert result.returncode == 0
