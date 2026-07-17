@@ -15,7 +15,7 @@ cd Hunyuan3D-2.1-low-vram
 command -v hunyuan3d
 hunyuan3d --version
 hunyuan3d doctor
-hunyuan3d models pull --components shape,texture
+hunyuan3d models pull --components prepare,shape,texture
 hunyuan3d generate --image ./flower.png --output-dir ./output --seed 42
 ```
 
@@ -27,7 +27,7 @@ The `shape` profile omits the PBR texturing dependencies and native extensions:
 
 ```bash
 ./bootstrap.sh --profile shape --install-command
-hunyuan3d models pull --components shape
+hunyuan3d models pull --components prepare,shape
 hunyuan3d generate --image ./flower.png --output-dir ./output --shape-only
 ```
 
@@ -41,7 +41,7 @@ hunyuan3d doctor
 
 # Inspect or explicitly fetch the pinned model revisions.
 hunyuan3d models status
-hunyuan3d models pull --components shape
+hunyuan3d models pull --components prepare,shape
 hunyuan3d models pull --components texture
 
 # Keep each recovery boundary as a separate command.

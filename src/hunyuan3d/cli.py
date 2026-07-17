@@ -100,9 +100,11 @@ def legacy_paths() -> None:
 
 def configure_runtime(cache: Path) -> None:
     cache.mkdir(parents=True, exist_ok=True)
-    os.environ.setdefault("HF_HOME", str(cache / "huggingface"))
-    os.environ.setdefault("HY3DGEN_MODELS", str(cache / "models"))
-    os.environ.setdefault("U2NET_HOME", str(cache / "rembg"))
+    # The selected CLI cache is the sole model source for this process.  Do
+    # not inherit a global Hugging Face or rembg cache when --cache-dir is set.
+    os.environ["HF_HOME"] = str(cache / "huggingface")
+    os.environ["HY3DGEN_MODELS"] = str(cache / "models")
+    os.environ["U2NET_HOME"] = str(cache / "rembg")
     # Importing torch first exposes its CUDA shared objects to the native
     # rasterizer extension, including on distributions without a global CUDA
     # runtime linker path.
@@ -163,11 +165,19 @@ def pull_models(cache: Path, components: set[str]) -> list[str]:
                           allow_patterns=["hunyuan3d-dit-v2-1/*"],
                           local_dir=cache / "models/tencent/Hunyuan3D-2.1")
         pulled.append("shape")
+    if "prepare" in components:
+        legacy_paths()
+        from hy3dshape.rembg import BackgroundRemover
+        # Constructing the rembg session downloads U²-Net into U2NET_HOME.
+        # configure_runtime() points that environment variable at this cache.
+        BackgroundRemover()
+        pulled.append("prepare")
     if "texture" in components:
         snapshot_download("tencent/Hunyuan3D-2.1", revision=MODEL_REVISIONS["hunyuan"],
                           allow_patterns=["hunyuan3d-paintpbr-v2-1/*"],
                           local_dir=cache / "models/tencent/Hunyuan3D-2.1")
-        snapshot_download("facebook/dinov2-giant", revision=MODEL_REVISIONS["dino"], cache_dir=cache / "huggingface")
+        snapshot_download("facebook/dinov2-giant", revision=MODEL_REVISIONS["dino"],
+                          local_dir=cache / "models/facebook/dinov2-giant")
         checkpoint = cache / "realesrgan/RealESRGAN_x4plus.pth"
         checkpoint.parent.mkdir(parents=True, exist_ok=True)
         if not checkpoint.exists():
@@ -181,7 +191,9 @@ def shape(image: Path, output: Path, cache: Path, steps: int, seed: int | None) 
     import torch
     from hy3dshape.pipelines import Hunyuan3DDiTFlowMatchingPipeline
     with contextlib.redirect_stdout(sys.stderr):
-        pipe = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained("tencent/Hunyuan3D-2.1")
+        pipe = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(
+            str(cache / "models/tencent/Hunyuan3D-2.1")
+        )
         if torch.cuda.get_device_properties(0).total_memory < 21 * 1024**3:
             pipe.enable_model_cpu_offload(device="cuda")
         generator = torch.Generator(device=pipe._execution_device).manual_seed(seed) if seed is not None else None
@@ -197,6 +209,8 @@ def texture(mesh: Path, image: Path, output: Path, cache: Path) -> Path:
     apply_fix()
     from textureGenPipeline import Hunyuan3DPaintConfig, Hunyuan3DPaintPipeline
     config = Hunyuan3DPaintConfig(max_num_view=6, resolution=512, cpu_offload=True)
+    config.multiview_pretrained_path = str(cache / "models/tencent/Hunyuan3D-2.1")
+    config.dino_ckpt_path = str(cache / "models/facebook/dinov2-giant")
     config.realesrgan_ckpt_path = str(cache / "realesrgan/RealESRGAN_x4plus.pth")
     with contextlib.redirect_stdout(sys.stderr):
         pipeline = Hunyuan3DPaintPipeline(config)
@@ -209,8 +223,9 @@ def model_status(cache: Path) -> dict:
     return {
         "shape": (root / "hunyuan3d-dit-v2-1/model.fp16.ckpt").is_file(),
         "texture": (root / "hunyuan3d-paintpbr-v2-1/unet/diffusion_pytorch_model.bin").is_file(),
-        "dino": (cache / "huggingface/hub/models--facebook--dinov2-giant").is_dir(),
+        "dino": (cache / "models/facebook/dinov2-giant/config.json").is_file(),
         "realesrgan": (cache / "realesrgan/RealESRGAN_x4plus.pth").is_file(),
+        "rembg": (cache / "rembg/u2net.onnx").is_file(),
     }
 
 
@@ -222,7 +237,7 @@ def build_parser() -> JsonArgumentParser:
     sub.add_parser("doctor", add_help=False)
     models = sub.add_parser("models", add_help=False)
     models.add_argument("action", choices=["pull", "status"])
-    models.add_argument("--components", default="shape,texture")
+    models.add_argument("--components", default="prepare,shape,texture")
     prep = sub.add_parser("prepare", add_help=False)
     prep.add_argument("image", type=Path)
     prep.add_argument("--output", type=Path, required=True)
@@ -269,7 +284,7 @@ def main(argv: list[str] | None = None) -> int:
                 require_file(args.image, "--image")
             if args.command == "models":
                 components = set(args.components.split(","))
-                invalid = sorted(component for component in components if component not in {"shape", "texture"})
+                invalid = sorted(component for component in components if component not in {"prepare", "shape", "texture"})
                 if invalid:
                     raise CliError("invalid_arguments", "Unknown model component.", 2, {"invalid": invalid})
             configure_runtime(cache)
@@ -283,6 +298,7 @@ def main(argv: list[str] | None = None) -> int:
                     return emit({"ok": True, "pulled": pull_models(cache, components), "cache": str(cache)})
                 return emit({"ok": True, "cache": str(cache), "models": model_status(cache)})
             if args.command == "prepare":
+                require_model_assets(cache, {"rembg"})
                 return emit({"ok": True, "image": str(prepare_image(args.image, args.output))})
             if args.command == "shape":
                 require_cuda()
@@ -293,7 +309,7 @@ def main(argv: list[str] | None = None) -> int:
                 require_model_assets(cache, {"texture", "dino", "realesrgan"})
                 return emit({"ok": True, "texture": str(texture(args.mesh, args.image, args.output, cache))})
             require_cuda()
-            required_models = {"shape"} if args.shape_only else {"shape", "texture", "dino", "realesrgan"}
+            required_models = {"rembg", "shape"} if args.shape_only else {"rembg", "shape", "texture", "dino", "realesrgan"}
             require_model_assets(cache, required_models)
             prepared = args.output_dir / "input.rgba.png"
             print("Preparing image...", file=sys.stderr, flush=True)

@@ -13,15 +13,15 @@
 # by Tencent in accordance with TENCENT HUNYUAN COMMUNITY LICENSE AGREEMENT.
 
 import os
+from pathlib import Path
 import torch
 import random
 import numpy as np
-from PIL import Image
 from typing import List
 import huggingface_hub
 from omegaconf import OmegaConf
 from diffusers import DiffusionPipeline
-from diffusers import EulerAncestralDiscreteScheduler, DDIMScheduler, UniPCMultistepScheduler
+from diffusers import UniPCMultistepScheduler
 
 
 class multiviewDiffusionNet:
@@ -34,10 +34,14 @@ class multiviewDiffusionNet:
         self.cfg = cfg
         self.mode = self.cfg.model.params.stable_diffusion_config.custom_pipeline[2:]
 
-        model_path = huggingface_hub.snapshot_download(
-            repo_id=config.multiview_pretrained_path,
-            allow_patterns=["hunyuan3d-paintpbr-v2-1/*"],
-        )
+        pretrained_path = Path(config.multiview_pretrained_path)
+        if pretrained_path.is_dir():
+            model_path = str(pretrained_path)
+        else:
+            model_path = huggingface_hub.snapshot_download(
+                repo_id=config.multiview_pretrained_path,
+                allow_patterns=["hunyuan3d-paintpbr-v2-1/*"],
+            )
 
         model_path = os.path.join(model_path, "hunyuan3d-paintpbr-v2-1")
         pipeline = DiffusionPipeline.from_pretrained(

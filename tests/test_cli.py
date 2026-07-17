@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -20,7 +21,125 @@ def test_model_status_reports_missing_models(tmp_path: Path):
         "texture": False,
         "dino": False,
         "realesrgan": False,
+        "rembg": False,
     }
+
+
+def test_model_status_uses_the_cli_local_dino_directory(tmp_path: Path):
+    dino = tmp_path / "models/facebook/dinov2-giant"
+    dino.mkdir(parents=True)
+    (dino / "config.json").touch()
+
+    assert cli.model_status(tmp_path)["dino"] is True
+
+
+def test_model_status_uses_the_cli_local_rembg_directory(tmp_path: Path):
+    rembg = tmp_path / "rembg"
+    rembg.mkdir()
+    (rembg / "u2net.onnx").touch()
+
+    assert cli.model_status(tmp_path)["rembg"] is True
+
+
+def test_configure_runtime_uses_the_selected_cache(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("HF_HOME", "/global/huggingface")
+    monkeypatch.setenv("HY3DGEN_MODELS", "/global/models")
+    monkeypatch.setenv("U2NET_HOME", "/global/rembg")
+    fake_torch = types.SimpleNamespace(__file__=str(tmp_path / "torch/__init__.py"))
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+    cli.configure_runtime(tmp_path)
+
+    assert os.environ["HF_HOME"] == str(tmp_path / "huggingface")
+    assert os.environ["HY3DGEN_MODELS"] == str(tmp_path / "models")
+    assert os.environ["U2NET_HOME"] == str(tmp_path / "rembg")
+
+
+def test_pull_models_preloads_rembg_into_the_selected_cache(monkeypatch, tmp_path: Path):
+    loaded = []
+
+    class FakeBackgroundRemover:
+        def __init__(self):
+            loaded.append(os.environ["U2NET_HOME"])
+
+    monkeypatch.setattr(cli, "legacy_paths", lambda: None)
+    monkeypatch.setitem(sys.modules, "huggingface_hub", types.SimpleNamespace(snapshot_download=lambda **kwargs: None))
+    monkeypatch.setitem(sys.modules, "hy3dshape.rembg", types.SimpleNamespace(BackgroundRemover=FakeBackgroundRemover))
+    monkeypatch.setenv("U2NET_HOME", str(tmp_path / "rembg"))
+
+    assert cli.pull_models(tmp_path, {"prepare"}) == ["prepare"]
+    assert loaded == [str(tmp_path / "rembg")]
+
+
+def test_prepare_requires_the_cached_background_remover(tmp_path: Path):
+    source = tmp_path / "input.png"
+    source.touch()
+
+    assert cli.main(["--cache-dir", str(tmp_path), "prepare", str(source), "--output", str(tmp_path / "output.png")]) == 3
+
+
+def test_shape_loads_weights_from_the_selected_cache(monkeypatch, tmp_path: Path):
+    loaded_paths = []
+
+    class FakeMesh:
+        def export(self, output):
+            assert output == tmp_path / "shape.glb"
+
+    class FakePipeline:
+        _execution_device = "cuda"
+
+        def __call__(self, **kwargs):
+            return [FakeMesh()]
+
+        def enable_model_cpu_offload(self, **kwargs):
+            raise AssertionError("CPU offload should not be enabled in this test")
+
+    class FakePipelineClass:
+        @staticmethod
+        def from_pretrained(path):
+            loaded_paths.append(path)
+            return FakePipeline()
+
+    fake_torch = types.SimpleNamespace(
+        cuda=types.SimpleNamespace(get_device_properties=lambda _: types.SimpleNamespace(total_memory=32 * 1024**3)),
+        Generator=lambda device: types.SimpleNamespace(manual_seed=lambda seed: (device, seed)),
+    )
+    monkeypatch.setattr(cli, "legacy_paths", lambda: None)
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    monkeypatch.setitem(sys.modules, "hy3dshape.pipelines", types.SimpleNamespace(
+        Hunyuan3DDiTFlowMatchingPipeline=FakePipelineClass
+    ))
+
+    assert cli.shape(tmp_path / "input.png", tmp_path / "shape.glb", tmp_path, 50, None) == tmp_path / "shape.glb"
+    assert loaded_paths == [str(tmp_path / "models/tencent/Hunyuan3D-2.1")]
+
+
+def test_texture_config_uses_only_the_selected_cache(monkeypatch, tmp_path: Path):
+    captured = {}
+
+    class FakeConfig:
+        def __init__(self, **kwargs):
+            captured["config"] = self
+
+    class FakePipeline:
+        def __init__(self, config):
+            assert config is captured["config"]
+
+        def __call__(self, **kwargs):
+            captured["call"] = kwargs
+
+    monkeypatch.setattr(cli, "legacy_paths", lambda: None)
+    monkeypatch.setitem(sys.modules, "torchvision_fix", types.SimpleNamespace(apply_fix=lambda: None))
+    monkeypatch.setitem(sys.modules, "textureGenPipeline", types.SimpleNamespace(
+        Hunyuan3DPaintConfig=FakeConfig,
+        Hunyuan3DPaintPipeline=FakePipeline,
+    ))
+
+    assert cli.texture(tmp_path / "shape.glb", tmp_path / "input.png", tmp_path / "textured.glb", tmp_path) == tmp_path / "textured.obj"
+    config = captured["config"]
+    assert config.multiview_pretrained_path == str(tmp_path / "models/tencent/Hunyuan3D-2.1")
+    assert config.dino_ckpt_path == str(tmp_path / "models/facebook/dinov2-giant")
+    assert config.realesrgan_ckpt_path == str(tmp_path / "realesrgan/RealESRGAN_x4plus.pth")
 
 
 def test_installed_cli_is_available_from_another_directory(tmp_path: Path):
