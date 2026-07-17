@@ -134,7 +134,8 @@ def pull_models(cache: Path, components: set[str]) -> list[str]:
         snapshot_download("tencent/Hunyuan3D-2.1", revision=MODEL_REVISIONS["hunyuan"],
                           allow_patterns=["hunyuan3d-paintpbr-v2-1/*"],
                           local_dir=cache / "models/tencent/Hunyuan3D-2.1")
-        snapshot_download("facebook/dinov2-giant", revision=MODEL_REVISIONS["dino"], cache_dir=cache / "huggingface")
+        snapshot_download("facebook/dinov2-giant", revision=MODEL_REVISIONS["dino"],
+                          local_dir=cache / "models/facebook/dinov2-giant")
         checkpoint = cache / "realesrgan/RealESRGAN_x4plus.pth"
         checkpoint.parent.mkdir(parents=True, exist_ok=True)
         if not checkpoint.exists():
@@ -148,7 +149,9 @@ def shape(image: Path, output: Path, cache: Path, steps: int, seed: int | None) 
     import torch
     from hy3dshape.pipelines import Hunyuan3DDiTFlowMatchingPipeline
     with contextlib.redirect_stdout(sys.stderr):
-        pipe = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained("tencent/Hunyuan3D-2.1")
+        pipe = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(
+            str(cache / "models/tencent/Hunyuan3D-2.1")
+        )
         if torch.cuda.get_device_properties(0).total_memory < 21 * 1024**3:
             pipe.enable_model_cpu_offload(device="cuda")
         generator = torch.Generator(device=pipe._execution_device).manual_seed(seed) if seed is not None else None
@@ -164,6 +167,8 @@ def texture(mesh: Path, image: Path, output: Path, cache: Path) -> Path:
     apply_fix()
     from textureGenPipeline import Hunyuan3DPaintConfig, Hunyuan3DPaintPipeline
     config = Hunyuan3DPaintConfig(max_num_view=6, resolution=512, cpu_offload=True)
+    config.multiview_pretrained_path = str(cache / "models/tencent/Hunyuan3D-2.1")
+    config.dino_ckpt_path = str(cache / "models/facebook/dinov2-giant")
     config.realesrgan_ckpt_path = str(cache / "realesrgan/RealESRGAN_x4plus.pth")
     with contextlib.redirect_stdout(sys.stderr):
         pipeline = Hunyuan3DPaintPipeline(config)
@@ -176,7 +181,7 @@ def model_status(cache: Path) -> dict:
     return {
         "shape": (root / "hunyuan3d-dit-v2-1/model.fp16.ckpt").is_file(),
         "texture": (root / "hunyuan3d-paintpbr-v2-1/unet/diffusion_pytorch_model.bin").is_file(),
-        "dino": (cache / "huggingface/hub/models--facebook--dinov2-giant").is_dir(),
+        "dino": (cache / "models/facebook/dinov2-giant/config.json").is_file(),
         "realesrgan": (cache / "realesrgan/RealESRGAN_x4plus.pth").is_file(),
     }
 
