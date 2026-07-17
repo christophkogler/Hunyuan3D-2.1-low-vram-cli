@@ -142,6 +142,33 @@ def test_texture_config_uses_only_the_selected_cache(monkeypatch, tmp_path: Path
     assert config.realesrgan_ckpt_path == str(tmp_path / "realesrgan/RealESRGAN_x4plus.pth")
 
 
+def test_texture_uses_repository_absolute_config_path(tmp_path: Path, monkeypatch):
+    captured = {}
+
+    class FakeConfig:
+        def __init__(self, **_kwargs):
+            pass
+
+    class FakePipeline:
+        def __init__(self, config):
+            captured["config"] = config
+
+        def __call__(self, **_kwargs):
+            pass
+
+    monkeypatch.setattr(cli, "legacy_paths", lambda: None)
+    monkeypatch.setitem(sys.modules, "torchvision_fix", types.SimpleNamespace(apply_fix=lambda: None))
+    monkeypatch.setitem(
+        sys.modules,
+        "textureGenPipeline",
+        types.SimpleNamespace(Hunyuan3DPaintConfig=FakeConfig, Hunyuan3DPaintPipeline=FakePipeline),
+    )
+
+    cli.texture(tmp_path / "shape.glb", tmp_path / "input.png", tmp_path / "textured", tmp_path / "cache")
+
+    assert captured["config"].multiview_cfg_path == str(cli.ROOT / "hy3dpaint/cfgs/hunyuan-paint-pbr.yaml")
+
+
 def test_installed_cli_is_available_from_another_directory(tmp_path: Path):
     script_dir = Path(sys.executable).parent
     assert (script_dir / "hunyuan3d").is_file()

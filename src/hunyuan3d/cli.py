@@ -211,6 +211,7 @@ def texture(mesh: Path, image: Path, output: Path, cache: Path) -> Path:
     config = Hunyuan3DPaintConfig(max_num_view=6, resolution=512, cpu_offload=True)
     config.multiview_pretrained_path = str(cache / "models/tencent/Hunyuan3D-2.1")
     config.dino_ckpt_path = str(cache / "models/facebook/dinov2-giant")
+    config.multiview_cfg_path = str(ROOT / "hy3dpaint/cfgs/hunyuan-paint-pbr.yaml")
     config.realesrgan_ckpt_path = str(cache / "realesrgan/RealESRGAN_x4plus.pth")
     with contextlib.redirect_stdout(sys.stderr):
         pipeline = Hunyuan3DPaintPipeline(config)
