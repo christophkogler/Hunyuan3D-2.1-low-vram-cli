@@ -19,7 +19,7 @@ hunyuan3d models pull --components prepare,shape,texture
 hunyuan3d generate --image ./flower.png --output-dir ./output --seed 42
 ```
 
-`bootstrap.sh` creates a Python 3.11 environment from the locked dependency graph and, for the `texture` and `all` profiles, compiles the two required CUDA/native extensions. Passing `--install-command` installs a user-local `hunyuan3d` command in `~/.local/bin` and adds that directory to `~/.bashrc` when needed. After opening a new Bash terminal, the command is available from any directory without activating the project environment. It never downloads model weights. `models pull` does that explicitly and stores them under `.cache/hunyuan3d/` in the clone (or `--cache-dir` / `HUNYUAN3D_CACHE`); this default is independent of the caller's current directory.
+`bootstrap.sh` creates a Python 3.11 environment from the locked dependency graph and, for the `texture` and `all` profiles, installs Blender's `bpy` module and compiles the two required CUDA/native extensions. Passing `--install-command` installs a user-local `hunyuan3d` command in `~/.local/bin` and adds that directory to `~/.bashrc` when needed. After opening a new Bash terminal, the command is available from any directory without activating the project environment. It never downloads model weights. `models pull` does that explicitly and stores them under `.cache/hunyuan3d/` in the clone (or `--cache-dir` / `HUNYUAN3D_CACHE`); this default is independent of the caller's current directory.
 
 `hunyuan3d --version` prints the installed `hunyuan3d-cli` package version. The user-local command points to the most recently installed clone; running `./bootstrap.sh --profile <profile> --install-command` in another clone deliberately changes that command to use the new clone. Re-run the same command after pulling upgrades to update both that clone's environment and the persistent command.
 
@@ -140,6 +140,12 @@ The previous Gradio, API, notebook, training, Docker-demo, and sample-data surfa
 final textured asset. `--shape-only` always writes `shape.glb` and does not run
 the texturing stage, regardless of the selected format. This structure lets an
 agent retry only the failed stage without rerunning shape generation.
+
+GLB export uses the locked Blender Python module (`bpy`) installed by the
+`texture`/`all` profiles. `generate --output-format glb` checks that module
+before loading models and reports an actionable dependency error when it is
+missing. Use `--output-format obj` when only the separate OBJ package is
+available.
 
 ## Attribution
 

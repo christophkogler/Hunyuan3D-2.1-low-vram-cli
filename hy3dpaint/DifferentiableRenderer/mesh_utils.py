@@ -267,7 +267,13 @@ def convert_obj_to_glb(
     try:
         global bpy
         import bpy
+    except ImportError as error:
+        raise ImportError(
+            "GLB export requires Blender's `bpy` Python module. "
+            "Install the texture profile before requesting GLB output."
+        ) from error
 
+    try:
         _setup_blender_scene()
         _clear_scene_objects()
 
@@ -282,5 +288,5 @@ def convert_obj_to_glb(
         # Export to GLB
         bpy.ops.export_scene.gltf(filepath=glb_path, use_active_scene=True)
         return True
-    except Exception:
-        return False
+    except Exception as error:
+        raise RuntimeError(f"OBJ to GLB conversion failed: {error}") from error
