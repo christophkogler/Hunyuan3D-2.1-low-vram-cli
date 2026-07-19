@@ -43,6 +43,8 @@ SUPPORTED_MESH_EXTENSIONS = frozenset(
     {".3ds", ".dae", ".fbx", ".glb", ".gltf", ".obj", ".off", ".ply", ".stl", ".x3d"}
 )
 MIN_STEPS = 1
+OUTPUT_FORMATS = ("glb", "obj")
+DEFAULT_OUTPUT_FORMAT = "glb"
 
 # Keep these paths as the single source of truth for both `models status` and
 # the doctor report. Each entry is a required readiness file for that component.
@@ -448,12 +450,21 @@ def planned_texture_outputs(output: Path) -> list[Path]:
     ]
 
 
-def texture_write_plan(mesh: Path, output: Path) -> list[Path]:
+def texture_write_plan(
+    mesh: Path, output: Path, output_format: str = "obj"
+) -> list[Path]:
     """Include the remesh intermediate as well as all predictable final files."""
-    return [mesh.parent / "white_mesh_remesh.obj", *planned_texture_outputs(output)]
+    paths = [mesh.parent / "white_mesh_remesh.obj", *planned_texture_outputs(output)]
+    if output_format == "glb":
+        paths.append(output.with_suffix(".glb"))
+    return paths
 
 
-def generate_write_plan(output_dir: Path, shape_only: bool) -> list[Path]:
+def generate_write_plan(
+    output_dir: Path,
+    shape_only: bool,
+    output_format: str = DEFAULT_OUTPUT_FORMAT,
+) -> list[Path]:
     paths = [
         output_dir / "input.rgba.png",
         output_dir / "shape.glb",
@@ -461,7 +472,9 @@ def generate_write_plan(output_dir: Path, shape_only: bool) -> list[Path]:
     ]
     if not shape_only:
         paths.extend(
-            texture_write_plan(output_dir / "shape.glb", output_dir / "textured")
+            texture_write_plan(
+                output_dir / "shape.glb", output_dir / "textured", output_format
+            )
         )
     return paths
 
@@ -543,12 +556,17 @@ def validate_command(args: argparse.Namespace) -> set[str] | None:
     elif args.command == "texture":
         require_supported_mesh(args.mesh, "--mesh")
         require_readable_image(args.image, "--image")
-        validate_output_plan(texture_write_plan(args.mesh, args.output), args.overwrite)
+        validate_output_plan(
+            texture_write_plan(args.mesh, args.output, "obj"), args.overwrite
+        )
     elif args.command == "generate":
         require_readable_image(args.image, "--image")
         require_valid_steps(args.steps)
         validate_output_plan(
-            generate_write_plan(args.output_dir, args.shape_only), args.overwrite
+            generate_write_plan(
+                args.output_dir, args.shape_only, args.output_format
+            ),
+            args.overwrite,
         )
     return None
 
@@ -660,7 +678,16 @@ def shape(image: Path, output: Path, cache: Path, steps: int, seed: int | None) 
     return output
 
 
-def texture(mesh: Path, image: Path, output: Path, cache: Path) -> Path:
+def texture(
+    mesh: Path,
+    image: Path,
+    output: Path,
+    cache: Path,
+    output_format: str = "obj",
+) -> Path:
+    if output_format not in OUTPUT_FORMATS:
+        raise ValueError(f"Unsupported texture output format: {output_format}")
+
     legacy_paths()
     from torchvision_fix import apply_fix
 
@@ -678,9 +705,18 @@ def texture(mesh: Path, image: Path, output: Path, cache: Path) -> Path:
             mesh_path=str(mesh),
             image_path=str(image),
             output_mesh_path=str(output.with_suffix(".obj")),
-            save_glb=False,
+            save_glb=output_format == "glb",
         )
-    return output.with_suffix(".obj")
+    final_output = output.with_suffix(f".{output_format}")
+    if output_format == "glb":
+        if not final_output.is_file():
+            raise RuntimeError(
+                "The texture pipeline did not produce the requested GLB output."
+            )
+        for intermediate in texture_write_plan(mesh, output, output_format):
+            if intermediate != final_output:
+                intermediate.unlink(missing_ok=True)
+    return final_output
 
 
 def model_readiness(cache: Path) -> dict:
@@ -1026,7 +1062,20 @@ def doctor_report(cache: Path, output_dir: Path) -> tuple[dict, int]:
 
 
 def build_parser() -> JsonArgumentParser:
-    parser = JsonArgumentParser(prog="hunyuan3d", add_help=False)
+    parser = JsonArgumentParser(
+        prog="hunyuan3d",
+        add_help=False,
+        description="Linux/NVIDIA command-line inference for Hunyuan3D 2.1.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "generate output formats:\n"
+            "  --output-format glb  Default final textured asset; writes textured.glb.\n"
+            "  --output-format obj  Alternate final asset; writes textured.obj,\n"
+            "                        textured.mtl, and PBR texture maps.\n"
+            "  --shape-only         Always writes the shape.glb checkpoint and\n"
+            "                        skips texturing, regardless of format."
+        ),
+    )
     parser.add_argument("--version", action="version", version=package_version())
     parser.add_argument("--cache-dir")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1054,6 +1103,16 @@ def build_parser() -> JsonArgumentParser:
     generate.add_argument("--image", type=Path, required=True)
     generate.add_argument("--output-dir", type=Path, required=True)
     generate.add_argument("--shape-only", action="store_true")
+    generate.add_argument(
+        "--output-format",
+        choices=OUTPUT_FORMATS,
+        default=DEFAULT_OUTPUT_FORMAT,
+        metavar="glb|obj",
+        help=(
+            "final textured asset format (default: glb; ignored with "
+            "--shape-only)"
+        ),
+    )
     generate.add_argument("--steps", type=int, default=50)
     generate.add_argument("--seed", type=int)
     generate.add_argument("--overwrite", action="store_true")
@@ -1109,7 +1168,10 @@ def run_command(
         return {"ok": True, "texture": str(output)}, 0
 
     with reporter.stage(
-        "generate", output_dir=str(args.output_dir), shape_only=args.shape_only
+        "generate",
+        output_dir=str(args.output_dir),
+        shape_only=args.shape_only,
+        output_format=args.output_format,
     ):
         require_cuda()
         required_models = (
@@ -1133,9 +1195,17 @@ def run_command(
                 "texture",
                 input=str(prepared),
                 mesh=str(glb),
-                output=str(texture_output),
+                output=str(texture_output.with_suffix(f".{args.output_format}")),
             ):
-                result["texture"] = str(texture(glb, prepared, texture_output, cache))
+                result["texture"] = str(
+                    texture(
+                        glb,
+                        prepared,
+                        texture_output,
+                        cache,
+                        output_format=args.output_format,
+                    )
+                )
         return result, 0
 
 

@@ -54,6 +54,9 @@ hunyuan3d texture --image work/flower.rgba.png --mesh work/shape.glb --output wo
 # The convenience path: prepare → shape → texture.
 hunyuan3d generate --image flower.png --output-dir output --seed 42
 
+# Select the separate-file OBJ workflow instead of the default GLB.
+hunyuan3d generate --image flower.png --output-dir output --output-format obj
+
 # Human-readable usage is available separately.
 hunyuan3d help
 ```
@@ -67,8 +70,8 @@ cause a structured `output_conflict` failure. Pass `--overwrite` to
 `prepare`, `shape`, `texture`, or `generate` to explicitly replace them. A
 partial `generate` directory is allowed when it contains only unrelated files;
 any existing planned file (`input.rgba.png`, `shape.glb`, `run.log`, the
-textured OBJ/MTL/maps, or the texture remesh intermediate) blocks the run until
-`--overwrite` is supplied.
+textured GLB or OBJ/MTL/maps, or the texture remesh intermediate) blocks the
+run until `--overwrite` is supplied.
 
 `doctor` reports GPU/CUDA and VRAM facts, importable dependencies and native
 extensions, model component readiness, cache/output disk space, and readiness
@@ -127,10 +130,16 @@ The previous Gradio, API, notebook, training, Docker-demo, and sample-data surfa
 
 - `input.rgba.png` — prepared reference image.
 - `shape.glb` — untextured shape checkpoint.
-- `textured.obj`, `.mtl`, and PBR texture maps — final textured asset.
+- `textured.glb` — final textured asset by default, with mesh and PBR materials
+  packaged in one portable file.
+- `textured.obj`, `textured.mtl`, and PBR texture maps — final textured asset
+  when `--output-format obj` is selected.
 - `run.log` — progress, warnings, and any failure traceback from this `generate` invocation.
 
-This structure lets an agent retry only the failed stage without rerunning shape generation.
+`--output-format` accepts `glb` (the default) or `obj` and controls only the
+final textured asset. `--shape-only` always writes `shape.glb` and does not run
+the texturing stage, regardless of the selected format. This structure lets an
+agent retry only the failed stage without rerunning shape generation.
 
 ## Attribution
 
