@@ -349,6 +349,59 @@ def test_texture_config_uses_only_the_selected_cache(monkeypatch, tmp_path: Path
     assert config.realesrgan_ckpt_path == str(
         tmp_path / "realesrgan/RealESRGAN_x4plus.pth"
     )
+    assert captured["call"]["save_glb"] is False
+
+
+def test_texture_can_emit_a_glb_and_removes_obj_intermediates(
+    monkeypatch, tmp_path: Path
+):
+    captured = {}
+
+    class FakeConfig:
+        def __init__(self, **_kwargs):
+            pass
+
+    class FakePipeline:
+        def __init__(self, _config):
+            pass
+
+        def __call__(self, **kwargs):
+            captured["call"] = kwargs
+            obj = Path(kwargs["output_mesh_path"])
+            obj.write_text("obj")
+            obj.with_suffix(".mtl").write_text("mtl")
+            obj.with_suffix(".jpg").write_text("albedo")
+            obj.with_name(f"{obj.stem}_metallic.jpg").write_text("metallic")
+            obj.with_name(f"{obj.stem}_roughness.jpg").write_text("roughness")
+            obj.parent.joinpath("white_mesh_remesh.obj").write_text("remesh")
+            obj.with_suffix(".glb").write_text("glb")
+
+    monkeypatch.setattr(cli, "legacy_paths", lambda: None)
+    monkeypatch.setitem(
+        sys.modules, "torchvision_fix", types.SimpleNamespace(apply_fix=lambda: None)
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "textureGenPipeline",
+        types.SimpleNamespace(
+            Hunyuan3DPaintConfig=FakeConfig,
+            Hunyuan3DPaintPipeline=FakePipeline,
+        ),
+    )
+
+    output = cli.texture(
+        tmp_path / "shape.glb",
+        tmp_path / "input.png",
+        tmp_path / "textured",
+        tmp_path,
+        output_format="glb",
+    )
+
+    assert output == tmp_path / "textured.glb"
+    assert output.is_file()
+    assert captured["call"]["save_glb"] is True
+    assert not (tmp_path / "textured.obj").exists()
+    assert not (tmp_path / "white_mesh_remesh.obj").exists()
 
 
 def test_texture_uses_repository_absolute_config_path(tmp_path: Path, monkeypatch):
@@ -701,7 +754,19 @@ def test_generate_write_plan_includes_texture_artifacts(tmp_path: Path):
         "textured.jpg",
         "textured_metallic.jpg",
         "textured_roughness.jpg",
+        "textured.glb",
     }
+
+    obj_planned = {
+        path.name
+        for path in cli.generate_write_plan(tmp_path / "output", False, "obj")
+    }
+    assert "textured.glb" not in obj_planned
+    assert cli.generate_write_plan(tmp_path / "output", True, "obj") == [
+        tmp_path / "output/input.rgba.png",
+        tmp_path / "output/shape.glb",
+        tmp_path / "output/run.log",
+    ]
 
 
 def test_overwrite_allows_an_existing_direct_output(
@@ -832,8 +897,14 @@ def test_generate_emits_ordered_jsonl_events_for_each_stage(
         output.touch()
         return output
 
-    def fake_texture(mesh: Path, image: Path, output: Path, cache: Path) -> Path:
-        return output.with_suffix(".obj")
+    def fake_texture(
+        mesh: Path,
+        image: Path,
+        output: Path,
+        cache: Path,
+        output_format: str,
+    ) -> Path:
+        return output.with_suffix(f".{output_format}")
 
     monkeypatch.setattr(cli, "prepare_image", fake_prepare)
     monkeypatch.setattr(cli, "shape", fake_shape)
@@ -860,7 +931,54 @@ def test_generate_emits_ordered_jsonl_events_for_each_stage(
         "texture",
     }
     assert len(captured.out.splitlines()) == 1
-    assert json.loads(captured.out)["ok"] is True
+    payload = json.loads(captured.out)
+    assert payload["ok"] is True
+    assert payload["texture"] == str(output_dir / "textured.glb")
+
+
+@pytest.mark.parametrize(
+    ("extra_arguments", "expected_output"),
+    [([], "textured.glb"), (["--output-format", "obj"], "textured.obj")],
+)
+def test_generate_output_format_controls_final_texture_path(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+    extra_arguments: list[str],
+    expected_output: str,
+):
+    source = tmp_path / "input.png"
+    Image.new("RGB", (1, 1), "white").save(source)
+    output_dir = tmp_path / "output"
+
+    monkeypatch.setattr(cli, "configure_runtime", lambda cache: None)
+    monkeypatch.setattr(cli, "require_cuda", lambda: None)
+    monkeypatch.setattr(cli, "require_model_assets", lambda cache, components: None)
+    monkeypatch.setattr(cli, "prepare_image", lambda image, output: output)
+    monkeypatch.setattr(cli, "shape", lambda image, output, cache, steps, seed: output)
+    monkeypatch.setattr(
+        cli,
+        "texture",
+        lambda mesh, image, output, cache, output_format: output.with_suffix(
+            f".{output_format}"
+        ),
+    )
+
+    assert (
+        cli.main(
+            [
+                "generate",
+                "--image",
+                str(source),
+                "--output-dir",
+                str(output_dir),
+                *extra_arguments,
+            ]
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["texture"] == str(output_dir / expected_output)
 
 
 def test_failed_stage_event_is_bounded_and_redacted(
@@ -997,3 +1115,5 @@ def test_help_remains_available_as_an_explicit_human_path():
     result = run_cli("help")
     assert result.returncode == 0
     assert result.stdout.startswith("usage: hunyuan3d")
+    assert "--output-format glb" in result.stdout
+    assert "textured.mtl" in result.stdout
