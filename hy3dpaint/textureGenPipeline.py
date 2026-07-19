@@ -13,6 +13,7 @@
 # by Tencent in accordance with TENCENT HUNYUAN COMMUNITY LICENSE AGREEMENT.
 
 import os
+import importlib
 import torch
 import copy
 import trimesh
@@ -96,6 +97,15 @@ class Hunyuan3DPaintPipeline:
     @torch.no_grad()
     def __call__(self, mesh_path=None, image_path=None, output_mesh_path=None, use_remesh=True, save_glb=True):
         """Generate texture for 3D mesh using multiview diffusion"""
+        if save_glb:
+            try:
+                importlib.import_module("bpy")
+            except ImportError as error:
+                raise ImportError(
+                    "GLB export requires Blender's `bpy` Python module. "
+                    "Install the texture profile before requesting GLB output."
+                ) from error
+
         # Ensure image_prompt is a list
         if isinstance(image_path, str):
             image_prompt = Image.open(image_path)
@@ -190,7 +200,10 @@ class Hunyuan3DPaintPipeline:
         self.render.save_mesh(output_mesh_path, downsample=True)
 
         if save_glb:
-            convert_obj_to_glb(output_mesh_path, output_mesh_path.replace(".obj", ".glb"))
             output_glb_path = output_mesh_path.replace(".obj", ".glb")
+            if not convert_obj_to_glb(output_mesh_path, output_glb_path):
+                raise RuntimeError(
+                    f"OBJ to GLB conversion did not produce the requested output: {output_glb_path}"
+                )
 
         return output_mesh_path

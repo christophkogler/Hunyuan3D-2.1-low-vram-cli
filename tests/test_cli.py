@@ -739,6 +739,43 @@ def test_generate_rejects_partial_output_plan_before_runtime_setup(
     assert not (output_dir / "run.log").exists()
 
 
+def test_generate_glb_requires_bpy_before_runtime_setup(
+    tmp_path: Path, monkeypatch, capsys
+):
+    source = tmp_path / "input.png"
+    Image.new("RGB", (1, 1), "white").save(source)
+    output_dir = tmp_path / "output"
+
+    monkeypatch.setattr(
+        cli, "probe_import", lambda module: {
+            "ready": False,
+            "module": module,
+            "error": "No module named 'bpy'",
+        }
+    )
+    monkeypatch.setattr(
+        cli, "configure_runtime", lambda _cache: pytest.fail("runtime was configured")
+    )
+
+    assert (
+        cli.main(
+            ["generate", "--image", str(source), "--output-dir", str(output_dir)]
+        )
+        == 5
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["error"] == {
+        "code": "dependency_failure",
+        "message": "GLB output requires Blender's `bpy` Python module in the active environment. Install the texture profile with `./bootstrap.sh --profile texture`.",
+        "details": {
+            "dependency": "bpy",
+            "module": "bpy",
+            "error": "No module named 'bpy'",
+        },
+    }
+    assert not output_dir.exists()
+
+
 def test_generate_write_plan_includes_texture_artifacts(tmp_path: Path):
     planned = {
         path.name for path in cli.generate_write_plan(tmp_path / "output", False)
@@ -883,6 +920,7 @@ def test_generate_emits_ordered_jsonl_events_for_each_stage(
     output_dir = tmp_path / "output"
 
     monkeypatch.setattr(cli, "configure_runtime", lambda cache: None)
+    monkeypatch.setattr(cli, "require_glb_export", lambda: None)
     monkeypatch.setattr(cli, "require_cuda", lambda: None)
     monkeypatch.setattr(cli, "require_model_assets", lambda cache, components: None)
 
@@ -951,6 +989,7 @@ def test_generate_output_format_controls_final_texture_path(
     output_dir = tmp_path / "output"
 
     monkeypatch.setattr(cli, "configure_runtime", lambda cache: None)
+    monkeypatch.setattr(cli, "require_glb_export", lambda: None)
     monkeypatch.setattr(cli, "require_cuda", lambda: None)
     monkeypatch.setattr(cli, "require_model_assets", lambda cache, components: None)
     monkeypatch.setattr(cli, "prepare_image", lambda image, output: output)

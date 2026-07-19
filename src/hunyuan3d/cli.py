@@ -74,6 +74,9 @@ MODEL_DEFINITIONS = {
 }
 
 DEPENDENCY_DEFINITIONS = {
+    "glb": {
+        "bpy": "bpy",
+    },
     "prepare": {
         "pillow": "PIL",
         "rembg": "rembg",
@@ -132,7 +135,7 @@ WORKFLOW_DEFINITIONS = {
     "generate": {
         "command": "generate",
         "models": ("rembg", "shape", "texture", "dino", "realesrgan"),
-        "dependencies": ("prepare", "shape", "texture"),
+        "dependencies": ("prepare", "shape", "texture", "glb"),
         "requires_cuda": True,
         "min_vram": MIN_WORKFLOW_VRAM,
         "native_extensions": tuple(NATIVE_EXTENSION_DEFINITIONS),
@@ -395,6 +398,24 @@ def require_cuda() -> None:
         )
 
 
+def require_glb_export() -> None:
+    """Validate the Blender Python module required by the GLB exporter."""
+    check = probe_import("bpy")
+    if check["ready"]:
+        return
+    raise CliError(
+        "dependency_failure",
+        "GLB output requires Blender's `bpy` Python module in the active environment. "
+        "Install the texture profile with `./bootstrap.sh --profile texture`.",
+        5,
+        {
+            "dependency": "bpy",
+            "module": "bpy",
+            "error": check.get("error"),
+        },
+    )
+
+
 def require_file(path: Path, argument: str) -> None:
     if not path.is_file():
         raise CliError(
@@ -613,6 +634,8 @@ def validate_command(args: argparse.Namespace) -> set[str] | None:
             generate_write_plan(args.output_dir, args.shape_only, args.output_format),
             args.overwrite,
         )
+        if not args.shape_only and args.output_format == "glb":
+            require_glb_export()
     return None
 
 

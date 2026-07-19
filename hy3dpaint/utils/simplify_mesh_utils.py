@@ -13,7 +13,6 @@
 # by Tencent in accordance with TENCENT HUNYUAN COMMUNITY LICENSE AGREEMENT.
 
 import trimesh
-import pymeshlab
 
 
 def remesh_mesh(mesh_path, remesh_path):
@@ -21,6 +20,8 @@ def remesh_mesh(mesh_path, remesh_path):
 
 
 def mesh_simplify_trimesh(inputpath, outputpath, target_count=40000):
+    import pymeshlab
+
     # 先去除离散面
     ms = pymeshlab.MeshSet()
     if inputpath.endswith(".glb"):

@@ -1,3 +1,4 @@
+import sys
 import types
 
 from hunyuan3d import cli
@@ -26,7 +27,9 @@ def test_mesh_simplification_uses_explicit_target_face_count(monkeypatch, tmp_pa
         def export(self, _path):
             pass
 
-    monkeypatch.setattr(simplify_mesh_utils.pymeshlab, "MeshSet", FakeMeshSet)
+    monkeypatch.setitem(
+        sys.modules, "pymeshlab", types.SimpleNamespace(MeshSet=FakeMeshSet)
+    )
     monkeypatch.setattr(simplify_mesh_utils.trimesh, "load", lambda *_args, **_kwargs: FakeMesh())
 
     simplify_mesh_utils.mesh_simplify_trimesh(str(tmp_path / "shape.obj"), str(tmp_path / "remeshed.obj"))
