@@ -758,8 +758,7 @@ def test_generate_write_plan_includes_texture_artifacts(tmp_path: Path):
     }
 
     obj_planned = {
-        path.name
-        for path in cli.generate_write_plan(tmp_path / "output", False, "obj")
+        path.name for path in cli.generate_write_plan(tmp_path / "output", False, "obj")
     }
     assert "textured.glb" not in obj_planned
     assert cli.generate_write_plan(tmp_path / "output", True, "obj") == [
@@ -1109,6 +1108,48 @@ def test_generate_runtime_log_retains_traceback(tmp_path: Path, monkeypatch, cap
     log = (output_dir / "run.log").read_text()
     assert "Traceback" in log
     assert "RuntimeError: shape pipeline failed" in log
+
+
+@pytest.mark.parametrize(
+    ("arguments", "usage"),
+    [
+        (("doctor", "--help"), "usage: hunyuan3d doctor"),
+        (("models", "--help"), "usage: hunyuan3d models"),
+        (("models", "status", "--help"), "usage: hunyuan3d models status"),
+        (("models", "pull", "-h"), "usage: hunyuan3d models pull"),
+        (("prepare", "--help"), "usage: hunyuan3d prepare"),
+        (("shape", "--help"), "usage: hunyuan3d shape"),
+        (("texture", "--help"), "usage: hunyuan3d texture"),
+        (("generate", "--help"), "usage: hunyuan3d generate"),
+    ],
+)
+def test_public_command_help_exits_without_operational_arguments(arguments, usage):
+    result = run_cli(*arguments)
+
+    assert result.returncode == 0
+    assert result.stderr == ""
+    assert result.stdout.startswith(usage)
+    assert "options:" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("arguments", "usage"),
+    [
+        (("help", "doctor"), "usage: hunyuan3d doctor"),
+        (("help", "models", "status"), "usage: hunyuan3d models status"),
+        (("help", "models", "pull"), "usage: hunyuan3d models pull"),
+        (("help", "prepare"), "usage: hunyuan3d prepare"),
+        (("help", "shape"), "usage: hunyuan3d shape"),
+        (("help", "texture"), "usage: hunyuan3d texture"),
+        (("help", "generate"), "usage: hunyuan3d generate"),
+    ],
+)
+def test_help_entry_point_supports_command_specific_usage(arguments, usage):
+    result = run_cli(*arguments)
+
+    assert result.returncode == 0
+    assert result.stderr == ""
+    assert result.stdout.startswith(usage)
 
 
 def test_help_remains_available_as_an_explicit_human_path():
