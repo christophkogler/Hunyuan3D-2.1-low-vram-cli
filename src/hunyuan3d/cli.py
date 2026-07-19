@@ -152,6 +152,53 @@ class CliError(Exception):
         self.details = details
 
 
+class HelpRequested(Exception):
+    """Signal that a parser should print human-readable help and exit."""
+
+    def __init__(self, parser: argparse.ArgumentParser):
+        super().__init__()
+        self.parser = parser
+
+
+class HelpAction(argparse.Action):
+    """Print help through ``main`` so direct calls do not raise SystemExit."""
+
+    def __init__(
+        self,
+        option_strings,
+        dest=argparse.SUPPRESS,
+        default=argparse.SUPPRESS,
+        **kwargs,
+    ):
+        super().__init__(
+            option_strings=option_strings,
+            dest=dest,
+            nargs=0,
+            default=default,
+            **kwargs,
+        )
+
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: Any,
+        option_string: str | None = None,
+    ) -> None:
+        raise HelpRequested(parser)
+
+
+class CliHelpFormatter(
+    argparse.ArgumentDefaultsHelpFormatter, argparse.RawDescriptionHelpFormatter
+):
+    """Show defaults while keeping the CLI help compact and readable."""
+
+    def _get_help_string(self, action: argparse.Action) -> str | None:
+        if action.default is None:
+            return action.help
+        return super()._get_help_string(action)
+
+
 class JsonArgumentParser(argparse.ArgumentParser):
     """Raise structured errors instead of writing usage text and exiting."""
 
@@ -563,9 +610,7 @@ def validate_command(args: argparse.Namespace) -> set[str] | None:
         require_readable_image(args.image, "--image")
         require_valid_steps(args.steps)
         validate_output_plan(
-            generate_write_plan(
-                args.output_dir, args.shape_only, args.output_format
-            ),
+            generate_write_plan(args.output_dir, args.shape_only, args.output_format),
             args.overwrite,
         )
     return None
@@ -1066,7 +1111,7 @@ def build_parser() -> JsonArgumentParser:
         prog="hunyuan3d",
         add_help=False,
         description="Linux/NVIDIA command-line inference for Hunyuan3D 2.1.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+        formatter_class=CliHelpFormatter,
         epilog=(
             "generate output formats:\n"
             "  --output-format glb  Default final textured asset; writes textured.glb.\n"
@@ -1076,47 +1121,226 @@ def build_parser() -> JsonArgumentParser:
             "                        skips texturing, regardless of format."
         ),
     )
-    parser.add_argument("--version", action="version", version=package_version())
-    parser.add_argument("--cache-dir")
-    sub = parser.add_subparsers(dest="command", required=True)
-    doctor = sub.add_parser("doctor", add_help=False)
-    doctor.add_argument("--output-dir", type=Path, default=Path.cwd())
-    models = sub.add_parser("models", add_help=False)
-    models.add_argument("action", choices=["pull", "status"])
-    models.add_argument("--components", default="prepare,shape,texture")
-    prep = sub.add_parser("prepare", add_help=False)
-    prep.add_argument("image", type=Path)
-    prep.add_argument("--output", type=Path, required=True)
-    prep.add_argument("--overwrite", action="store_true")
-    shape_cmd = sub.add_parser("shape", add_help=False)
-    shape_cmd.add_argument("--image", type=Path, required=True)
-    shape_cmd.add_argument("--output", type=Path, required=True)
-    shape_cmd.add_argument("--steps", type=int, default=50)
-    shape_cmd.add_argument("--seed", type=int)
-    shape_cmd.add_argument("--overwrite", action="store_true")
-    texture_cmd = sub.add_parser("texture", add_help=False)
-    texture_cmd.add_argument("--mesh", type=Path, required=True)
-    texture_cmd.add_argument("--image", type=Path, required=True)
-    texture_cmd.add_argument("--output", type=Path, required=True)
-    texture_cmd.add_argument("--overwrite", action="store_true")
-    generate = sub.add_parser("generate", add_help=False)
-    generate.add_argument("--image", type=Path, required=True)
-    generate.add_argument("--output-dir", type=Path, required=True)
-    generate.add_argument("--shape-only", action="store_true")
+    add_help(parser)
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=package_version(),
+        help="show the installed CLI version and exit",
+    )
+    parser.add_argument(
+        "--cache-dir",
+        help="model and runtime cache directory (default: clone-local .cache/hunyuan3d)",
+    )
+    sub = parser.add_subparsers(dest="command", required=True, title="commands")
+
+    doctor = add_command_parser(
+        sub,
+        "doctor",
+        help="inspect runtime, model, dependency, and disk readiness",
+        description=(
+            "Inspect CUDA, dependencies, native extensions, model assets, disk space,\n"
+            "and workflow readiness without creating directories or downloading files."
+        ),
+    )
+    doctor.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path.cwd(),
+        help="directory whose available disk space is reported",
+    )
+
+    models = add_command_parser(
+        sub,
+        "models",
+        help="inspect or download pinned model assets",
+        description=(
+            "Inspect model readiness or download the pinned model assets into the selected cache."
+        ),
+    )
+    # Keep accepting the historical `models --components ... pull` ordering.
+    models.add_argument(
+        "--components",
+        default="prepare,shape,texture",
+        help="comma-separated components for pull (default: prepare,shape,texture)",
+    )
+    model_actions = models.add_subparsers(
+        dest="action", required=True, title="model actions"
+    )
+    models_status = add_command_parser(
+        model_actions,
+        "status",
+        help="report readiness of model files in the selected cache",
+        description="Report whether each model component is ready; no files are downloaded.",
+    )
+    models_status.add_argument(
+        "--components",
+        default=argparse.SUPPRESS,
+        help=(
+            "validate a comma-separated component selection (default: "
+            "prepare,shape,texture; status reports all components)"
+        ),
+    )
+    models_pull = add_command_parser(
+        model_actions,
+        "pull",
+        help="download pinned model assets into the selected cache",
+        description="Download the selected pinned model components and report their cache location.",
+    )
+    models_pull.add_argument(
+        "--components",
+        default=argparse.SUPPRESS,
+        help="comma-separated components to download (default: prepare,shape,texture)",
+    )
+
+    prep = add_command_parser(
+        sub,
+        "prepare",
+        help="remove the background and write an RGBA image",
+        description=(
+            "Remove the source image background and write the prepared RGBA image\n"
+            "used by the shape and generate workflows."
+        ),
+    )
+    prep.add_argument("image", type=Path, help="source image")
+    prep.add_argument(
+        "--output", type=Path, required=True, help="destination RGBA image artifact"
+    )
+    prep.add_argument(
+        "--overwrite", action="store_true", help="replace an existing output file"
+    )
+
+    shape_cmd = add_command_parser(
+        sub,
+        "shape",
+        help="generate an untextured GLB mesh",
+        description=(
+            "Generate the untextured shape checkpoint from a prepared image.\n"
+            "Output artifact: the GLB mesh supplied to --output."
+        ),
+    )
+    shape_cmd.add_argument(
+        "--image", type=Path, required=True, help="prepared input image"
+    )
+    shape_cmd.add_argument(
+        "--output", type=Path, required=True, help="destination untextured GLB artifact"
+    )
+    shape_cmd.add_argument("--steps", type=int, default=50, help="diffusion steps")
+    shape_cmd.add_argument("--seed", type=int, help="random seed")
+    shape_cmd.add_argument(
+        "--overwrite", action="store_true", help="replace an existing output file"
+    )
+
+    texture_cmd = add_command_parser(
+        sub,
+        "texture",
+        help="generate PBR textures for a mesh",
+        description=(
+            "Generate PBR textures from an image and mesh. The OBJ texture export\n"
+            "writes <output>.obj, <output>.mtl, and PBR texture maps."
+        ),
+    )
+    texture_cmd.add_argument("--mesh", type=Path, required=True, help="input mesh")
+    texture_cmd.add_argument(
+        "--image", type=Path, required=True, help="reference image"
+    )
+    texture_cmd.add_argument(
+        "--output", type=Path, required=True, help="output texture asset prefix"
+    )
+    texture_cmd.add_argument(
+        "--overwrite", action="store_true", help="replace existing output files"
+    )
+
+    generate = add_command_parser(
+        sub,
+        "generate",
+        help="run prepare, shape, and texture as one workflow",
+        description=(
+            "Run the complete prepare -> shape -> texture workflow.\n"
+            "Outputs: input.rgba.png, shape.glb, textured.glb (or OBJ/MTL/maps),\n"
+            "and run.log in --output-dir."
+        ),
+    )
+    generate.add_argument("--image", type=Path, required=True, help="source image")
+    generate.add_argument(
+        "--output-dir",
+        type=Path,
+        required=True,
+        help="directory for generated artifacts",
+    )
+    generate.add_argument(
+        "--shape-only",
+        action="store_true",
+        help="write only input.rgba.png and shape.glb",
+    )
     generate.add_argument(
         "--output-format",
         choices=OUTPUT_FORMATS,
         default=DEFAULT_OUTPUT_FORMAT,
         metavar="glb|obj",
-        help=(
-            "final textured asset format (default: glb; ignored with "
-            "--shape-only)"
-        ),
+        help="final textured asset format (ignored with --shape-only)",
     )
-    generate.add_argument("--steps", type=int, default=50)
-    generate.add_argument("--seed", type=int)
-    generate.add_argument("--overwrite", action="store_true")
-    sub.add_parser("help", add_help=False)
+    generate.add_argument("--steps", type=int, default=50, help="shape diffusion steps")
+    generate.add_argument("--seed", type=int, help="random seed")
+    generate.add_argument(
+        "--overwrite", action="store_true", help="replace planned output files"
+    )
+
+    help_command = add_command_parser(
+        sub,
+        "help",
+        help="show human-readable help for a command",
+        description="Show top-level help or command-specific help without running a workflow.",
+    )
+    help_command.add_argument(
+        "target",
+        nargs="?",
+        choices=("doctor", "models", "prepare", "shape", "texture", "generate"),
+        help="command to describe",
+    )
+    help_command.add_argument(
+        "models_action",
+        nargs="?",
+        choices=("status", "pull"),
+        help="models action to describe when target is models",
+    )
+
+    parser._help_parsers = {
+        "doctor": doctor,
+        "models": models,
+        "models status": models_status,
+        "models pull": models_pull,
+        "prepare": prep,
+        "shape": shape_cmd,
+        "texture": texture_cmd,
+        "generate": generate,
+    }
+    return parser
+
+
+def add_help(parser: argparse.ArgumentParser) -> None:
+    """Add conventional ``-h``/``--help`` flags to a CLI parser."""
+    parser.add_argument(
+        "-h", "--help", action=HelpAction, help="show this help message and exit"
+    )
+
+
+def add_command_parser(
+    subparsers: argparse._SubParsersAction,
+    name: str,
+    *,
+    help: str,
+    description: str,
+) -> JsonArgumentParser:
+    """Create a command parser with consistent human-readable help."""
+    parser = subparsers.add_parser(
+        name,
+        add_help=False,
+        help=help,
+        description=description,
+        formatter_class=CliHelpFormatter,
+    )
+    add_help(parser)
     return parser
 
 
@@ -1213,11 +1437,20 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     try:
         args = parser.parse_args(argv)
+    except HelpRequested as request:
+        request.parser.print_help()
+        return 0
     except CliError as error:
         return emit_error(error)
 
     if args.command == "help":
-        parser.print_help()
+        if args.target is None:
+            parser.print_help()
+        else:
+            target = args.target
+            if target == "models" and args.models_action is not None:
+                target = f"models {args.models_action}"
+            parser._help_parsers[target].print_help()
         return 0
 
     reporter = ProgressReporter(args.command, sys.stderr)
